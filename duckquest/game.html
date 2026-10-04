@@ -1,0 +1,1555 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DuckQuest</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;cursor:none;user-select:none}
+  canvas{display:block;width:100vw;height:100vh}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+/* =========================================================================
+   DuckQuest — light-gun duck shooter aimed with Quest 3 controllers.
+   Quest page streams controller poses -> server.py -> this page.
+   Mouse works too (left click = shoot, right click = reload) for testing.
+   Gamepad: stick aims, RT/A shoots, LT/B reloads, Y = cycle weapon (pistol/shotgun/machine gun) · W/Tab/middle-click = switch weapon · Keys: C calibrate (aim) · T calibrate (touch) · F fullscreen · D debug · Enter/Space start · Esc title
+   ========================================================================= */
+
+// ---------- helpers ----------
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const sub = (a, b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2]];
+const add = (a, b) => [a[0]+b[0], a[1]+b[1], a[2]+b[2]];
+const scl = (a, s) => [a[0]*s, a[1]*s, a[2]*s];
+const dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+const cross = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+const len = a => Math.sqrt(dot(a, a));
+function qrot(q, v){ // rotate vector v by quaternion q=[x,y,z,w]
+  const u = [q[0], q[1], q[2]], w = q[3];
+  const t = scl(cross(u, v), 2);
+  return add(add(v, scl(t, w)), cross(u, t));
+}
+const store = {
+  get(k, d){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
+  set(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+};
+let MIRROR = store.get('duckquest.mirror', true);          // Quest faces the player: its left/right is the player's right/left (V toggles)
+let RETRO = store.get('duckquest.retro', true);            // NES-style pixel graphics (G toggles)
+const font = (size, weight = 800) => RETRO ? `900 ${Math.round(size)}px ui-monospace, "Courier New", monospace`
+                                           : `${weight} ${Math.round(size)}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
+
+// ---------- One Euro filter (smooths jitter, stays responsive on fast moves) ----------
+class OneEuro {
+  constructor(minCut = 1.5, beta = 0.9, dCut = 1.0){ this.minCut = minCut; this.beta = beta; this.dCut = dCut; this.x = null; this.dx = 0; }
+  a(cut, dt){ const tau = 1 / (2 * Math.PI * cut); return 1 / (1 + tau / dt); }
+  f(v, dt){
+    if (this.x === null){ this.x = v; return v; }
+    const dx = (v - this.x) / dt;
+    this.dx += this.a(this.dCut, dt) * (dx - this.dx);
+    const cut = this.minCut + this.beta * Math.abs(this.dx);
+    this.x += this.a(cut, dt) * (v - this.x);
+    return this.x;
+  }
+  reset(){ this.x = null; this.dx = 0; }
+}
+
+// ---------- canvas & scenery ----------
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W = 0, H = 0, GRASS = 0, DPR = 1, PX = 4;
+let blades = [], hillsFar = [], hillsNear = [], clouds = [];
+
+function buildScenery(){
+  blades = [];
+  const n = Math.ceil(W / 5);
+  for (let i = 0; i < n; i++){
+    const tall = Math.random() < 0.04;
+    blades.push({ x: rand(0, W), h: tall ? rand(H*0.10, H*0.16) : rand(H*0.015, H*0.07), lean: rand(-12, 12), ph: rand(0, 6.28), tall });
+  }
+  const hill = (base, amp, seed) => {
+    const pts = []; for (let x = 0; x <= W + 20; x += 20){
+      pts.push([x, base - amp * (0.55*Math.sin(x/W*6.3 + seed) + 0.3*Math.sin(x/W*13 + seed*2) + 0.15*Math.sin(x/W*29 + seed*3))]);
+    } return pts;
+  };
+  hillsFar = hill(H*0.62, H*0.08, 1.3);
+  hillsNear = hill(H*0.72, H*0.06, 4.1);
+  clouds = [];
+  for (let i = 0; i < 6; i++) clouds.push({ x: rand(0, W), y: rand(H*0.08, H*0.4), s: rand(0.6, 1.4), v: rand(6, 18) });
+}
+function resize(){
+  const d = Math.min(2, window.devicePixelRatio || 1);
+  W = innerWidth; H = innerHeight;
+  cv.width = Math.round(W * d); cv.height = Math.round(H * d);
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+  GRASS = H * 0.8; DPR = d;
+  buildScenery(); buildRetro();
+}
+addEventListener('resize', resize);
+
+const PALETTES = [
+  { top:'#3a8dde', bot:'#a6dcff', sun:'#fff6c2', far:'#5c9e6a', near:'#3f7d4c', grass:'#2f6b36', blade:'#3d8a45' }, // day
+  { top:'#2b2d6e', bot:'#ff8a5c', sun:'#ffd27a', far:'#5a4a6e', near:'#3d3552', grass:'#2c4a2a', blade:'#3b6236' }, // sunset
+  { top:'#141a3a', bot:'#7a4aa0', sun:'#ffd9a0', far:'#32294f', near:'#221d3a', grass:'#1d3320', blade:'#2a4a2c' }, // dusk
+  { top:'#050816', bot:'#1b2550', sun:'#e8eefc', far:'#141c33', near:'#0e1427', grass:'#0d1f14', blade:'#16331f' }  // night
+];
+
+
+// ---------- retro (NES Duck Hunt style) graphics ----------
+// Everything is built from integer-aligned rectangles ("pixels" of size PX) so it stays crisp at any resolution.
+const NES = { sky: '#3cbcfc', g0: '#005800', g1: '#00a800', g2: '#80d010', brown: '#a84800', dbrown: '#503000',
+              tan: '#f8d8a8', black: '#000000', white: '#fcfcfc', orange: '#f87800', red: '#d82800' };
+let retroBG = null, retroFG = null, RETRO_SKY = NES.sky, RETRO_STARS = false;
+function setSky(c, stars = false){ if (c === RETRO_SKY && !!stars === RETRO_STARS) return; RETRO_SKY = c; RETRO_STARS = !!stars; buildRetro(); }
+const hash = (a, b) => { let h = (a * 374761393 + b * 668265263) | 0; h = (h ^ (h >>> 13)) * 1274126177 | 0; return ((h ^ (h >>> 16)) >>> 0) / 4294967295; };
+function makeLayer(){
+  const c = document.createElement('canvas'); c.width = cv.width; c.height = cv.height;
+  const o = c.getContext('2d'); o.setTransform(DPR, 0, 0, DPR, 0, 0); o.imageSmoothingEnabled = false; return [c, o];
+}
+function buildRetro(){
+  if (!cv.width || !cv.height) return;
+  PX = Math.max(2, Math.round(H / 220));
+  const u = PX, sn = v => Math.round(v / u) * u;
+  // --- background: sky, tree, bushes ---
+  let [c, o] = makeLayer(); retroBG = c;
+  const R = (x, y, w, h, col) => { o.fillStyle = col; o.fillRect(sn(x), sn(y), Math.max(u, sn(w)), Math.max(u, sn(h))); };
+  R(0, 0, W, GRASS + u * 2, RETRO_SKY);
+  if (RETRO_STARS) for (let i = 0; i < 90; i++) R(hash(i, 21) * W, hash(i, 22) * GRASS * 0.8, u, u, hash(i, 23) > 0.7 ? '#fcfcfc' : '#9090d8');
+  // bushes along the horizon
+  for (let x = 0, i = 0; x < W; x += u * 6, i++){
+    const bh = u * (4 + Math.floor(hash(i, 7) * 6));
+    R(x, GRASS - bh, u * 6, bh + u * 2, NES.g1);
+    R(x, GRASS - bh, u * 6, u, NES.g2);
+    if (hash(i, 3) > 0.5) R(x + u * 2, GRASS - bh + u * 2, u * 2, u, NES.g0);
+  }
+  // tree on the left
+  const tx = W * 0.085, tw = u * 9, top = H * 0.36;
+  R(tx - tw / 2, top, tw, GRASS - top + u, NES.brown);
+  R(tx - tw / 2, top, u * 2, GRASS - top + u, NES.dbrown);
+  R(tx + tw / 2 - u * 2, top + u * 6, u, GRASS - top, NES.dbrown);
+  const cy = H * 0.27, rx = u * 30, ry = u * 22;
+  for (let yy = -ry; yy <= ry; yy += u){
+    const k = Math.sqrt(Math.max(0, 1 - (yy / ry) ** 2)), half = Math.floor(rx * k / u) * u;
+    for (let xx = -half; xx < half; xx += u){
+      const n = hash(Math.round(xx / u), Math.round(yy / u));
+      const edge = (Math.abs(xx) > half - u * 2) || (Math.abs(yy) > ry - u * 2);
+      o.fillStyle = edge ? NES.g0 : (n > 0.78 ? NES.g2 : (n > 0.35 ? NES.g1 : NES.g0));
+      o.fillRect(sn(tx + xx), sn(cy + yy), u, u);
+    }
+  }
+  // --- foreground: grass band, tufts, dirt strip (drawn over ducks and the dog) ---
+  [c, o] = makeLayer(); retroFG = c;
+  const FH = H * 0.9;
+  R(0, GRASS + u * 2, W, FH - GRASS - u * 2, NES.g1);
+  for (let x = 0, i = 0; x < W; x += u * 3, i++){        // ragged top edge
+    const th = u * (1 + Math.floor(hash(i, 11) * 4));
+    R(x, GRASS + u * 2 - th, u * 2, th, hash(i, 5) > 0.5 ? NES.g1 : NES.g0);
+  }
+  for (let y = GRASS + u * 5, row = 0; y < FH - u * 2; y += u * 4, row++)   // chevron pattern
+    for (let x = (row % 2) * u * 5; x < W; x += u * 10){
+      R(x, y, u, u, NES.g2); R(x + u, y + u, u, u, NES.g2); R(x + u * 2, y, u, u, NES.g2);
+    }
+  R(0, FH, W, u, NES.dbrown); R(0, FH + u, W, H - FH, NES.black);
+  return;
+}
+
+// ----- sprites: rectangles in sprite units, origin at the sprite's anchor -----
+function rects(list, x, y, unit, flipX = 1, flipY = 1){
+  ctx.save(); ctx.translate(Math.round(x), Math.round(y)); ctx.scale(unit * flipX, unit * flipY);
+  for (const [rx, ry, rw, rh, col] of list){ ctx.fillStyle = col; ctx.fillRect(rx, ry, rw, rh); }
+  ctx.restore();
+}
+const DUCK_COLORS = [   // [body, wing, head]
+  ['#181818', '#7c7c7c', '#00a800'],   // black duck
+  ['#2038ec', '#80b0fc', '#3cbcfc'],   // blue duck
+  ['#d82800', '#fc9878', '#f8b800']    // red duck (golden)
+];
+function duckParts(col, frame, dead){
+  const [b, w, h] = col, t = NES.tan, k = NES.black;
+  const body = [
+    [-7, -2, 3, 2, b],                                  // tail
+    [-5, -2, 8, 4, b], [-4, -3, 6, 1, b], [-4, 2, 6, 1, b], [-5, -1, 9, 3, b],
+    [-3, 1, 5, 2, t],                                   // belly
+    [3, -5, 4, 4, h], [4, -6, 2, 1, h], [3, -1, 3, 1, NES.white],   // head + neck ring
+    [7, -4, 3, 2, NES.orange],                          // beak
+    dead ? [5, -4, 1, 1, '#fcfcfc'] : [5, -4, 1, 1, k]  // eye
+  ];
+  const wing = frame === 0 ? [[-4, -7, 3, 5, w], [-5, -4, 2, 2, w], [-2, -8, 2, 2, w]]       // up
+             : frame === 1 ? [[-5, -3, 7, 2, w]]                                              // level
+             :               [[-4, 1, 6, 3, w], [-5, 3, 3, 2, w]];                             // down
+  return body.concat(wing);
+}
+function dogParts(kind, f, t){
+  const B = '#b85800', D = '#683000', T = NES.tan, K = NES.black;
+  const p = [];
+  if (kind === 'walk' || kind === 'sniff' || kind === 'alert'){
+    const hy = kind === 'alert' ? -4 : 0, bob = kind === 'sniff' ? (Math.sin(t * 22) > 0 ? 1 : 0) : 0;
+    p.push([-8, -10, 2, 4, B], [-7, -8, 2, 2, B]);                       // tail
+    p.push([-6, -8, 12, 5, B], [-5, -4, 9, 2, T]);                        // body, belly
+    const l = f % 2 ? [[-5, -2, 2, 3], [3, -2, 2, 3]] : [[-4, -2, 2, 3], [4, -2, 2, 3]];
+    for (const [x, y, w, h] of l) p.push([x, y, w, h, B]);
+    p.push([5, -8 + hy + bob, 5, 5, B], [8, -6 + hy + bob, 4, 3, T], [11, -5 + hy + bob, 1, 1, K], [5, -9 + hy + bob, 2, 5, D], [8, -7 + hy + bob, 1, 1, K]);
+  } else if (kind === 'jump'){
+    p.push([-7, -11, 2, 3, B], [-6, -9, 12, 5, B], [-5, -5, 9, 2, T], [-5, -4, 3, 2, B], [3, -4, 3, 2, B]);
+    p.push([5, -13, 5, 5, B], [9, -12, 3, 3, T], [11, -12, 1, 1, K], [5, -14, 2, 5, D], [8, -12, 1, 1, K]);
+  } else if (kind === 'catch'){
+    p.push([-5, -1, 10, 6, B], [-4, -9, 8, 8, B], [-6, -9, 2, 6, D], [4, -9, 2, 6, D],
+           [-2, -5, 4, 4, T], [-1, -5, 2, 1, K], [-3, -7, 1, 1, K], [2, -7, 1, 1, K]);
+  } else if (kind === 'laugh'){
+    const sh = Math.sin(t * 30) > 0 ? 1 : 0;
+    p.push([-5, -1, 10, 6, B], [-5, -10 + sh, 10, 9, B], [-8, -10 + sh, 3, 8, D], [5, -10 + sh, 3, 8, D],
+           [-3, -6 + sh, 6, 5, T], [-2, -4 + sh, 4, 2, K], [-2, -4 + sh, 4, 1, NES.white], [-1, -6 + sh, 2, 1, K],
+           [-4, -8 + sh, 2, 1, K], [2, -8 + sh, 2, 1, K]);
+  }
+  return p;
+}
+const dogU = () => Math.max(2, Math.round(PX * 2.2));
+
+// Dog timeline during the round intro: walk in, sniff, alert, jump into the grass.
+function drawDogIntro(){
+  const t = G.stateT, u = dogU(), gy = GRASS + u * 2, xs = W * 0.36;
+  let kind = 'walk', x, y = gy;
+  if (t < 1.3){ x = -u * 12 + (xs + u * 12) * (t / 1.3); kind = 'walk'; }
+  else if (t < 1.7){ x = xs; kind = 'sniff'; }
+  else if (t < 1.95){ x = xs; kind = 'alert'; }
+  else if (t < 2.55){
+    const s = (t - 1.95) / 0.6; kind = 'jump'; x = xs + W * 0.07 * s;
+    y = gy - H * 0.2 * 4 * s * (1 - s) + s * s * s * u * 14;
+  } else return;
+  rects(dogParts(kind, Math.floor(t * 8), t), x, y, u);
+}
+// Dog after each flock: pops out of the grass holding the ducks, or laughs.
+function drawDogPop(){
+  const d = G.dog; if (!d) return;
+  const u = dogU(), rise = 0.3, T = 1.5;
+  const k = d.t < rise ? d.t / rise : d.t > T - rise ? Math.max(0, (T - d.t) / rise) : 1;
+  const gy = GRASS + u * 1 + (1 - k) * u * 14, x = d.x;
+  rects(dogParts(d.kind, 0, d.t), x, gy, u);
+  if (d.kind === 'catch'){
+    const col = DUCK_COLORS[(G.round - 1) % 2];
+    const pos = d.n >= 2 ? [-u * 7, u * 7] : [0], du = Math.max(2, Math.round(u * 0.6));
+    for (const dx of pos) rects(duckParts(col, 2, true), x + dx, gy - u * 12, du, 1, -1);
+  }
+}
+
+// ----- retro duck, HUD, crosshair -----
+function drawDuckRetro(d){
+  const u = Math.max(2, Math.round(d.r / 7));
+  const col = DUCK_COLORS[d.golden ? 2 : (G.round - 1) % 2];
+  const flying = d.state === 'fly' || d.state === 'escape';
+  const frame = flying ? [0, 1, 2, 1][Math.floor(d.anim * 9) % 4] : (d.state === 'hit' ? 0 : 2);
+  rects(duckParts(col, frame, d.state === 'hit' || d.state === 'fall'), d.x, d.y, u, d.face, d.state === 'fall' ? -1 : 1);
+}
+function retroHUD(now){
+  const u = PX, bar = H * 0.9 + u, fs = Math.max(14, H * 0.034);
+  const shown = PLIST.filter(p => p.joined || p.score > 0 || present(p, now));
+  text(G.mode === 'party' ? `LV ${G.round}` : `R=${G.round}`, W * 0.03, bar + fs * 0.9, fs, NES.white, 'left');
+  text(`HI ${String(G.high).padStart(6, '0')}`, W * 0.97, bar + fs * 0.9, fs, NES.orange, 'right');
+  if (G.mode === 'bears') text(`BEARS ${Math.min(G.spawned, BEARS_PER_ROUND(G.round))}/${BEARS_PER_ROUND(G.round)}    LIVES x${G.lives}`, W / 2, bar + fs * 0.9, fs, NES.white, 'center');
+  else if (G.mode === 'party') partyHUD(bar, fs);
+  // tally: hit ducks turn red
+  const n = DUCKS_PER_ROUND, s = u * 4, gap = u * 2, tw = n * (s * 2 + gap), tx = W / 2 - tw / 2;
+  if (G.mode === 'normal') text('HIT', tx - fs * 0.5, bar + fs * 0.9, fs * 0.8, NES.g2, 'right');
+  if (G.mode === 'normal') for (let i = 0; i < n; i++){
+    const st = G.tally[i], c = st === 'hit' ? '#f83800' : st === 'miss' ? '#585858' : NES.white;
+    rects([[0, 0, 3, 1, c], [-1, 1, 5, 2, c], [0, 3, 3, 1, c]], tx + i * (s * 2 + gap) + s, bar + fs * 0.3, u);
+  }
+  // per-player: score, weapon and ammo
+  const pw = W / Math.max(1, shown.length), y2 = bar + fs * 2.2;
+  shown.forEach((p, i) => {
+    const cx = pw * i + pw / 2, left = cx - Math.min(pw * 0.45, W * 0.2);
+    text(`${p.label} ${String(p.score).padStart(6, '0')}`, left, y2, fs * 0.9, p.color, 'left');
+    text(WEAPONS[p.weapon], cx + Math.min(pw * 0.45, W * 0.2), y2, fs * 0.6, NES.white, 'right');
+    for (let k = 0; k < MAX_AMMO; k++){
+      const bx = left + (pw > W * 0.5 ? fs * 5.5 : fs * 5.2) + k * u * 4;
+      const c = k < p.ammo ? NES.white : '#383838';
+      rects([[0, 0, 2, 3, c], [0, -1, 2, 1, k < p.ammo ? NES.orange : '#383838']], bx, y2 - u * 3, u);
+    }
+    if (p.ammo === 0 && Math.floor(now / 300) % 2 === 0)
+      text(p.name === 'mouse' ? 'RELOAD' : 'RELOAD (aim off-screen)', left + fs * 5.2 + MAX_AMMO * u * 4 + fs * 0.6, y2, fs * 0.5, '#f8b8b8', 'left');
+  });
+}
+function retroCrosshair(p, off){
+  const x = clamp(p.nx * W, 26, W - 26), y = clamp(p.ny * H, 26, H - 26);
+  const u = Math.max(3, PX), r = 8 + Math.round(p.muzzle * 12), c = p.color, t = 2;   // sprite units
+  const shapes = [[-r, -r, 5, t], [-r, -r, t, 5], [r - 4, -r, 5, t], [r - 1, -r, t, 5],
+                  [-r, r - 1, 5, t], [-r, r - 4, t, 5], [r - 4, r - 1, 5, t], [r - 1, r - 4, t, 5],      // corner brackets
+                  [-1, -4, t, 3], [-1, 1, t, 3], [-4, -1, 3, t], [1, -1, 3, t], [-1, -1, t, t]];         // centre cross + dot
+  ctx.globalAlpha = off ? 0.55 : 1;
+  rects(shapes.map(([a, b, w, h]) => [a - 1, b - 1, w + 2, h + 2, '#000']), x, y, u);   // black outline so it reads on sky and grass
+  rects(shapes.map(([a, b, w, h]) => [a, b, w, h, c]), x, y, u);
+  ctx.globalAlpha = 1;
+  text(p.label, x + (r + 3) * u, y - (r + 3) * u, Math.max(14, H * 0.024), c, 'left');
+}
+function retroWorld(now){
+  if (!cv.width || !cv.height) return;
+  if (!retroBG || retroBG.width !== cv.width || retroBG.height !== cv.height) buildRetro();   // e.g. window was 0x0 at load
+  ctx.drawImage(retroBG, 0, 0, W, H);
+  if (G.state === 'roundIntro' && G.mode !== 'party') drawDogIntro();
+  drawDogPop();
+}
+function retroFront(){ if (retroFG && retroFG.width) ctx.drawImage(retroFG, 0, 0, W, H); }
+resize();   // first layout, after all retro helpers exist
+
+// ---------- audio (synthesised, no files) ----------
+const sfx = (() => {
+  let ac = null, master = null, noise = null;
+  function init(){
+    if (!ac){
+      try {
+        ac = new (window.AudioContext || window.webkitAudioContext)();
+        master = ac.createGain(); master.gain.value = 0.6; master.connect(ac.destination);
+        const n = Math.floor(ac.sampleRate * 0.5);
+        noise = ac.createBuffer(1, n, ac.sampleRate);
+        const d = noise.getChannelData(0); for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+      } catch { ac = null; }
+    }
+    if (ac && ac.state === 'suspended') ac.resume();
+    if (ac && typeof music !== 'undefined' && RETRO) music.start();
+  }
+  const ok = () => ac && ac.state === 'running';
+  function env(g, t, a, peak, dec){
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(peak, t + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + a + dec);
+  }
+  function tone(type, f0, f1, dur, vol, delay = 0){
+    if (!ok()) return;
+    const t = ac.currentTime + delay, o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    env(g, t, 0.005, vol, dur); o.connect(g).connect(master); o.start(t); o.stop(t + dur + 0.05);
+  }
+  function shot(){
+    if (!ok()) return;
+    const t = ac.currentTime;
+    const s = ac.createBufferSource(); s.buffer = noise;
+    const f = ac.createBiquadFilter(); f.type = 'lowpass';
+    f.frequency.setValueAtTime(3500, t); f.frequency.exponentialRampToValueAtTime(300, t + 0.25);
+    const g = ac.createGain(); env(g, t, 0.003, 0.9, 0.28);
+    s.connect(f).connect(g).connect(master); s.start(t); s.stop(t + 0.35);
+    tone('sine', 150, 45, 0.18, 0.8);
+  }
+  function quack(vol = 0.22){
+    if (!ok()) return;
+    const t = ac.currentTime;
+    for (let i = 0; i < 2; i++){
+      const tt = t + i * 0.16, base = rand(470, 560);
+      const o = ac.createOscillator(); o.type = 'sawtooth';
+      o.frequency.setValueAtTime(base, tt); o.frequency.exponentialRampToValueAtTime(base * 0.7, tt + 0.12);
+      const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1300; bp.Q.value = 4;
+      const g = ac.createGain(); env(g, tt, 0.01, vol, 0.12);
+      o.connect(bp).connect(g).connect(master); o.start(tt); o.stop(tt + 0.17);
+    }
+  }
+
+  // ---- chiptune music: original little march, two voices (square lead + triangle bass) ----
+  const NOTE = { C2:65.41, D2:73.42, E2:82.41, F2:87.31, G2:98, A2:110, B2:123.47, C3:130.81, D3:146.83, E3:164.81, F3:174.61, G3:196,
+                 A3:220, B3:246.94, C4:261.63, D4:293.66, E4:329.63, F4:349.23, G4:392, A4:440, B4:493.88,
+                 C5:523.25, D5:587.33, E5:659.25, F5:698.46, G5:783.99, A5:880, B5:987.77, C6:1046.5, D6:1174.66 };
+  const L = s => s.split(' '), STEP = 0.17;                      // one eighth note
+  const LEAD = [
+    ...L('E5 E5 G5 E5 C5 D5 E5 -'), ...L('F5 F5 A5 F5 D5 E5 F5 -'), ...L('G5 G5 C6 B5 A5 G5 F5 E5'), ...L('D5 F5 E5 D5 C5 - - -'),
+    ...L('A5 - A5 C6 A5 G5 E5 -'),  ...L('G5 - G5 B5 G5 F5 D5 -'),  ...L('E5 G5 C6 G5 E5 G5 C6 -'),  ...L('D6 C6 B5 A5 G5 - - -')];
+  const BASS = [
+    ...L('C3 - G2 - C3 - G2 -'), ...L('F2 - C3 - F2 - C3 -'), ...L('C3 - G2 - C3 - E3 -'), ...L('G2 - D3 - G2 - C3 -'),
+    ...L('F2 - C3 - F2 - A2 -'), ...L('G2 - D3 - G2 - B2 -'), ...L('C3 - E3 - C3 - E3 -'), ...L('G2 - G2 - C3 - C3 -')];
+  const mus = { on: true, step: 0, next: 0, timer: null, vol: 0.09 };
+  function note(type, f, t, dur, vol){
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.value = f;
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(master); o.start(t); o.stop(t + dur + 0.02);
+  }
+  function pump(){
+    if (!ok() || !mus.on) return;
+    if (mus.next < ac.currentTime) mus.next = ac.currentTime + 0.05;
+    while (mus.next < ac.currentTime + 0.3){
+      const i = mus.step % LEAD.length, l = LEAD[i], b = BASS[i];
+      if (l !== '-') note('square', NOTE[l], mus.next, STEP * 1.7, mus.vol);
+      if (b !== '-') note('triangle', NOTE[b], mus.next, STEP * 1.9, mus.vol * 2.2);
+      if (i % 2 === 1) { // soft hat on the off-beat
+        const s2 = ac.createBufferSource(); s2.buffer = noise; const hp = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 7000;
+        const g2 = ac.createGain(); g2.gain.setValueAtTime(mus.vol * 0.5, mus.next); g2.gain.exponentialRampToValueAtTime(0.0001, mus.next + 0.04);
+        s2.connect(hp).connect(g2).connect(master); s2.start(mus.next); s2.stop(mus.next + 0.05);
+      }
+      mus.next += STEP; mus.step++;
+    }
+  }
+  function musicOn(on){ mus.on = on; if (on && !mus.timer) mus.timer = setInterval(pump, 50); if (!on && mus.timer){ clearInterval(mus.timer); mus.timer = null; } }
+  const music = { set: musicOn, toggle: () => { musicOn(!mus.on); return mus.on; }, get on(){ return mus.on; }, start: () => { if (mus.on && !mus.timer) musicOn(true); } };
+  function growl(power = 1){            // low wobbling saw + rough noise
+    if (!ok()) return;
+    const t = ac.currentTime, dur = 0.55 + 0.5 * power;
+    const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.setValueAtTime(58 + 14 * power, t); o.frequency.exponentialRampToValueAtTime(42, t + dur);
+    const lfo = ac.createOscillator(), lg = ac.createGain(); lfo.frequency.value = 26; lg.gain.value = 22; lfo.connect(lg).connect(o.frequency);
+    const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 520; lp.Q.value = 2;
+    const g = ac.createGain(); env(g, t, 0.05, 0.55 * Math.min(1, 0.5 + power * 0.5), dur);
+    o.connect(lp).connect(g).connect(master); o.start(t); lfo.start(t); o.stop(t + dur + 0.1); lfo.stop(t + dur + 0.1);
+    const n = ac.createBufferSource(); n.buffer = noise; const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 260; bp.Q.value = 1.2;
+    const g2 = ac.createGain(); env(g2, t, 0.04, 0.35 * power, dur * 0.9); n.connect(bp).connect(g2).connect(master); n.start(t); n.stop(t + dur);
+  }
+  const tune = (notes, beat = 0.42) => { let t = 0; for (const [f, b] of notes){ tone('square', f, f, b * beat * 0.9, 0.17, t); tone('triangle', f / 2, f / 2, b * beat * 0.9, 0.12, t); t += b * beat; } };
+  return {
+    init, shot, quack, growl, tune, ready: ok, music,
+    pop:     () => { tone('square', 1100, 260, 0.07, 0.16); tone('sine', 300, 120, 0.06, 0.2); },
+    sparkle: () => [1047, 1319, 1568, 2093, 2637].forEach((f, i) => tone('triangle', f, f, 0.12, 0.2, i * 0.05)),
+    whoosh:  () => tone('sine', 260, 520, 0.18, 0.08),
+    hit:    () => { tone('square', 660, 1320, 0.12, 0.16); },
+    empty:  () => tone('square', 220, 200, 0.04, 0.12),
+    reload: () => { tone('square', 300, 280, 0.04, 0.15); tone('square', 520, 500, 0.05, 0.15, 0.09); },
+    thud:   () => tone('sine', 120, 50, 0.15, 0.35),
+    jingle: notes => notes.forEach((n, i) => tone('triangle', n, n * 0.999, 0.2, 0.25, i * 0.12))
+  };
+})();
+
+// ---------- players ----------
+const MAX_AMMO = 6;
+function makePlayer(name, label, color){
+  return { name, label, color, raw: null, lastSeen: -1e9, hasAim: false, nx: 0.5, ny: 0.5, rawN: null,
+           fx: new OneEuro(), fy: new OneEuro(), lastT: 0, trigHeld: false, aHeld: false,
+           ammo: MAX_AMMO, score: 0, combo: 0, hits: 0, shots: 0, muzzle: 0, joined: false, bx: 0, by: 0, vx: 0, vy: 0, poseAt: 0, weapon: 'gun', lastShot: 0, hold: { m: false, pad: false, q: false }, mgAcc: 0 };
+}
+const players = {
+  left:  makePlayer('left',  'P1', '#4cc9ff'),
+  right: makePlayer('right', 'P2', '#ffb703'),
+  mouse: makePlayer('mouse', 'P3', '#ffffff')
+};
+const PLIST = [players.left, players.right, players.mouse];
+// Aim smoothing: lower cutoff = steadier crosshair but a bit more lag. [ and ] change it; saved in the browser.
+const SMOOTH_MIN = [2.2, 1.6, 1.2, 1.0, 0.7, 0.5];
+let smoothLevel = clamp(store.get('duckquest.smooth', 3), 0, SMOOTH_MIN.length - 1);
+function applySmooth(){ for (const p of PLIST){ p.fx.minCut = p.fy.minCut = SMOOTH_MIN[smoothLevel]; p.fx.beta = p.fy.beta = 0.9; } }
+applySmooth();
+const present = (p, now = performance.now()) => now - p.lastSeen < 3000;
+const offscreen = p => !p.hasAim || p.nx < 0 || p.nx > 1 || p.ny < 0 || p.ny > 1;
+
+// ---------- calibration ----------
+// Two modes:
+//   'aim'   (default) — from your seat, point at the 4 screen corners. Works wherever the TV is,
+//           even off to the side of the Quest. Best when players stay roughly in one spot.
+//   'touch' — touch the controller tip to 3 screen corners. Most exact, but the Quest must
+//           be able to see the controller at the TV (e.g. Quest placed under the TV).
+const CAL_KEY = 'duckquest.calib.v3';
+// One calibration per controller: calibs.left (P1) and calibs.right (P2), each with its own four-corner plane and bullseye offset.
+// (v2 stored a single shared calibration; it is migrated to both hands.)
+const normCalibs = c => {
+  if (!c) return null;
+  if (c.v === 3) return { left: c.left || null, right: c.right || null };
+  if (c.mode){ const L = JSON.parse(JSON.stringify(c)), R = JSON.parse(JSON.stringify(c)); L.off = { left: (c.off || {}).left || [0, 0] }; R.off = { right: (c.off || {}).right || [0, 0] }; return { left: L, right: R }; }
+  return null;
+};
+let calibs = normCalibs(store.get(CAL_KEY, null)) || normCalibs(store.get('duckquest.calib.v2', null)) || { left: null, right: null };
+const isCalibrated = () => !!(calibs.left || calibs.right);
+const calibFor = who => calibs[who] || calibs.left || calibs.right || null;     // an uncalibrated hand borrows the other's plane until it is calibrated
+// A copy lives on the server (duckquest/calib.json + timestamped backups), written only when a calibration is finished.
+// On load: nothing local -> restore from the server; local but nothing on the server -> upload. "?restore" forces a restore.
+const calibPayload = () => ({ v: 3, left: calibs.left, right: calibs.right });
+const calibSave = () => { store.set(CAL_KEY, calibPayload()); try { fetch('/calib', { method: 'POST', body: JSON.stringify(calibPayload()) }).catch(() => {}); } catch {} };
+{
+  const force = /[?&]restore\b/.test(location.search);
+  fetch('/calib').then(r => r.ok ? r.json() : null).catch(() => null).then(c => {
+    const n = normCalibs(c);
+    if (n && (force || !isCalibrated())){ calibs = n; store.set(CAL_KEY, calibPayload()); popup(W / 2, H * 0.5, 'CALIBRATION RESTORED', '#4ade80', 1.8); sfx.jingle([523, 659]); }
+    else if (!n && isCalibrated()) calibSave();
+  });
+}
+let calibWarning = '';
+const CAL = { mode: 'aim', corners: [], step: 0, pts: {}, done: new Set(), msg: '', who: 'left', quick: false, chain: false };   // who = the one controller being calibrated
+const CORNERS_TOUCH = [['tl', 'TOP-LEFT'], ['tr', 'TOP-RIGHT'], ['bl', 'BOTTOM-LEFT']];
+const CORNERS_AIM   = [['tl', 'TOP-LEFT'], ['tr', 'TOP-RIGHT'], ['br', 'BOTTOM-RIGHT'], ['bl', 'BOTTOM-LEFT']];
+const AIM_PLANE_DIST = 2.5;   // metres: virtual screen distance used by aim mode
+const norm = a => scl(a, 1 / (len(a) || 1));
+
+function solveLinear(A, b){ // Gaussian elimination with partial pivoting
+  const n = b.length, M = A.map((r, i) => [...r, b[i]]);
+  for (let c = 0; c < n; c++){
+    let piv = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[piv][c])) piv = r;
+    if (Math.abs(M[piv][c]) < 1e-12) return null;
+    [M[c], M[piv]] = [M[piv], M[c]];
+    for (let r = 0; r < n; r++){ if (r === c) continue; const f = M[r][c] / M[c][c]; for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k]; }
+  }
+  return M.map((r, i) => r[n] / r[i]);
+}
+function homography(src, dst){
+  const A = [], b = [];
+  for (let i = 0; i < 4; i++){
+    const [x, y] = src[i], [u, v] = dst[i];
+    A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
+    A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
+  }
+  const h = solveLinear(A, b); return h ? [...h, 1] : null;
+}
+const applyH = (h, x, y) => { const w = h[6] * x + h[7] * y + 1; return { x: (h[0] * x + h[1] * y + h[2]) / w, y: (h[3] * x + h[4] * y + h[5]) / w }; };
+
+function planeHit2D(c, p, d){ // ray -> 2D coords on the aim-mode virtual plane
+  const den = dot(d, c.n); if (den < 1e-4) return null;
+  const t = dot(sub(c.c0, p), c.n) / den; if (t <= 0) return null;
+  const r = sub(add(p, scl(d, t)), c.c0);
+  return [dot(r, c.e1), dot(r, c.e2)];
+}
+function buildAimCalib(pts){
+  const keys = ['tl', 'tr', 'br', 'bl'];
+  const dirs = keys.map(k => pts[k].d), poss = keys.map(k => pts[k].p);
+  const origin = scl(poss.reduce(add), 1 / 4);
+  const n = norm(dirs.reduce(add));
+  if (dot(dirs[0], dirs[1]) > Math.cos(3 * Math.PI / 180) || dot(dirs[0], dirs[3]) > Math.cos(2 * Math.PI / 180)) return null;
+  let e1 = cross(n, [0, 1, 0]); if (len(e1) < 0.1) e1 = cross(n, [1, 0, 0]); e1 = norm(e1);
+  const e2 = cross(e1, n);
+  const c = { mode: 'aim', n, e1, e2, c0: add(origin, scl(n, AIM_PLANE_DIST)), off: {} };
+  const src = []; for (let i = 0; i < 4; i++){ const q = planeHit2D(c, poss[i], dirs[i]); if (!q) return null; src.push(q); }
+  c.H = homography(src, [[0, 0], [1, 0], [1, 1], [0, 1]]);
+  return c.H ? c : null;
+}
+
+function projectRaw(raw, who, c = calibFor(who)){
+  if (!c || !raw) return null;
+  const d = qrot(raw.q, [0, 0, -1]);
+  if (c.mode === 'aim'){
+    const q = planeHit2D(c, raw.p, d); if (!q) return null;
+    return applyH(c.H, q[0], q[1]);
+  }
+  const u = sub(c.tr, c.tl), v = sub(c.bl, c.tl), n = cross(u, v);
+  const den = dot(d, n); if (Math.abs(den) < 1e-6) return null;
+  const t = dot(sub(c.tl, raw.p), n) / den; if (t < 0) return null;
+  const r = sub(add(raw.p, scl(d, t)), c.tl);
+  return { x: dot(r, u) / dot(u, u), y: dot(r, v) / dot(v, v) };
+}
+
+function startCalib(mode = 'aim', who = 'left'){
+  G.state = 'calib'; CAL.who = who; CAL.quick = false; CAL.chain = who === 'left'; CAL.mode = mode;   // after P1's calibration, P2 follows as its own step
+  CAL.corners = mode === 'aim' ? CORNERS_AIM : CORNERS_TOUCH;
+  CAL.step = 0; CAL.pts = {}; CAL.done = new Set(); CAL.seen = new Set(); CAL.msg = ''; calibWarning = '';
+  G.ducks = [];
+}
+// A/X on a controller calibrates THAT controller in full (four corners + bullseye). K / J = bullseye only, to re-tune a calibrated hand.
+const calibrateFor = name => startCalib('aim', name === 'right' ? 'right' : 'left');
+function startFineTune(who = 'right'){
+  if (!calibs[who]){ startCalib('aim', who); return; }
+  const c = calibs[who];
+  G.state = 'calib'; CAL.who = who; CAL.quick = true; CAL.chain = false; CAL.mode = c.mode; CAL.corners = c.mode === 'aim' ? CORNERS_AIM : CORNERS_TOUCH;
+  CAL.step = CAL.corners.length; CAL.pts = {}; CAL.done = new Set(); CAL.seen = new Set(); CAL.msg = ''; calibWarning = ''; G.ducks = [];
+}
+function finishCalib(){
+  calibSave();
+  G.state = 'title';
+  popup(W/2, H*0.55, 'CALIBRATED!', '#4ade80', 1.6);
+  sfx.jingle([523, 659, 784]);
+  if (CAL.chain && CAL.who === 'left'){ CAL.chain = false; startCalib('aim', 'right'); CAL.chain = false; popup(W / 2, H * 0.6, 'P1 DONE - NOW P2', '#4ade80', 2.0); }
+}
+const cornerCtrl = () => CAL.who;
+const calibTarget = () => (CAL.who && !CAL.done.has(CAL.who)) ? CAL.who : null;
+function calibTrigger(p){
+  if (p.name === 'mouse' || !p.raw) return;
+  if (p.name !== CAL.who) return;                   // only the controller being calibrated counts
+  const nC = CAL.corners.length;
+  if (CAL.step < nC){
+    const key = CAL.corners[CAL.step][0];
+    CAL.pts[key] = CAL.mode === 'aim' ? { p: p.raw.p.slice(), d: qrot(p.raw.q, [0, 0, -1]) } : p.raw.p.slice();
+    CAL.step++; sfx.hit(); haptic(p, 0.8, 60);
+    if (CAL.step === nC){
+      let c = null;
+      if (CAL.mode === 'aim') c = buildAimCalib(CAL.pts);
+      else {
+        const u = sub(CAL.pts.tr, CAL.pts.tl), v = sub(CAL.pts.bl, CAL.pts.tl);
+        if (len(u) >= 0.15 && len(v) >= 0.08) c = { mode: 'touch', tl: CAL.pts.tl, tr: CAL.pts.tr, bl: CAL.pts.bl, off: {} };
+      }
+      if (!c){
+        CAL.step = 0; CAL.pts = {};
+        CAL.msg = CAL.mode === 'aim' ? 'Corners were too close together — aim carefully at each corner and try again.'
+                                     : 'That screen looked too small — touch the exact corners and try again.';
+        return;
+      }
+      calibs[CAL.who] = c; CAL.msg = '';
+    }
+    return;
+  }
+  // last step: aim fine-tune per controller, in order: left (P1), then right (P2)
+  const pr = projectRaw(p.raw, p.name);
+  if (!pr){ CAL.msg = `${p.label}: cannot read the aim - point the controller toward the screen and pull again.`; return; }
+  CAL.msg = '';
+  calibs[p.name].off[p.name] = [0.5 - pr.x, 0.5 - pr.y];
+  CAL.done.add(p.name); sfx.hit(); haptic(p, 0.8, 60);
+  finishCalib();
+}
+
+// ---------- network ----------
+let ws = null, questCount = 0, lastPoseAt = 0;
+function connect(){
+  if (location.protocol === 'file:') return;
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws?role=game`);
+  ws.onmessage = e => {
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    if (m.type === 'status') questCount = m.quests;
+    else if (m.type === 'pose') onPose(m);
+    else if (m.type === 'pad') PAD.remote = { t: performance.now(), axes: m.axes, btn: m.btn };
+    else if (m.type === 'reset'){ calibWarning = 'Quest view was recentered — recalibrate (A/X or C).'; }
+  };
+  ws.onclose = () => { questCount = 0; setTimeout(connect, 1000); };
+}
+connect();
+function haptic(p, strength, ms){
+  if (p.name === 'mouse' || !ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({ type: 'haptic', hand: p.name, strength, ms }));
+}
+
+const POSE = { n: 0, t0: 0, hz: 0, avg: 0, max: 0, sum: 0, cnt: 0, last: 0 };
+function poseStats(now){
+  if (POSE.last){ const g = now - POSE.last; POSE.sum += g; POSE.cnt++; POSE.max = Math.max(POSE.max, g); }
+  POSE.last = now; POSE.n++;
+  if (now - POSE.t0 > 2000){ POSE.hz = POSE.n * 1000 / (now - POSE.t0); POSE.avg = POSE.cnt ? POSE.sum / POSE.cnt : 0; POSE.shownMax = POSE.max; POSE.n = 0; POSE.sum = 0; POSE.cnt = 0; POSE.max = 0; POSE.t0 = now; }
+}
+function onPose(m){
+  const now = performance.now(); poseStats(now); lastPoseAt = now;
+  for (const name of ['left', 'right']){
+    const h = m.hands[name], p = players[name];
+    if (!h) continue;
+    p.raw = h; p.lastSeen = now;
+    const dt = clamp((m.t - p.lastT) / 1000, 1/240, 0.1); p.lastT = m.t;
+    const pr = projectRaw(h, name);
+    if (pr){
+      const fx = p.fx.f(pr.x, dt), fy = p.fy.f(pr.y, dt);
+      p.rawN = { x: fx, y: fy };
+      const cc = calibFor(name), o = (cc && cc.off && cc.off[name]) || [0, 0];
+      const bx = fx + o[0], by = fy + o[1], dts = p.poseAt ? Math.max(0.004, (now - p.poseAt) / 1000) : 0;
+      if (dts && p.hasAim){   // aim velocity (screen widths/s), lightly smoothed, for short-gap extrapolation
+        p.vx += 0.25 * (clamp((bx - p.bx) / dts, -3, 3) - p.vx); p.vy += 0.25 * (clamp((by - p.by) / dts, -3, 3) - p.vy);
+      } else { p.vx = 0; p.vy = 0; }
+      p.bx = bx; p.by = by; p.poseAt = now; p.nx = bx; p.ny = by; p.hasAim = true;
+    } else { p.hasAim = false; p.rawN = null; p.fx.reset(); p.fy.reset(); }
+    // trigger with hysteresis
+    if (!p.trigHeld && h.trig > 0.6){ p.trigHeld = true; triggerPressed(p, 'q'); }
+    else if (p.trigHeld && h.trig < 0.3){ p.trigHeld = false; p.hold.q = false; }
+    // A / X button
+    if (h.a && !p.aHeld){ p.aHeld = true; if (G.state === 'title' || G.state === 'gameover') calibrateFor(p.name); else if (G.state === 'playing' || G.state === 'roundIntro') toggleWeapon(p); }
+    else if (!h.a) p.aHeld = false;
+    if (h.grip > 0.7 && !p.gripHeld){ p.gripHeld = true; if (p.ammo < MAX_AMMO){ p.ammo = MAX_AMMO; p.mgAcc = 0; sfx.reload(); haptic(p, 0.5, 40); } }
+    else if (h.grip < 0.3) p.gripHeld = false;   // grip button = reload
+    if (h.b && !p.bHeld){ p.bHeld = true; dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })); }   // B/Y = Enter (finish calibration, start)
+    else if (!h.b) p.bHeld = false;
+  }
+}
+
+// ---------- game state ----------
+const DUCKS_PER_ROUND = 10;
+const G = { state: 'title', round: 1, spawned: 0, ducks: [], tally: [], stateT: 0, batchDelay: 0,
+            flash: 0, high: store.get('duckquest.high', 0), debug: false, fps: 60, perfect: false,
+            dog: null, batchN: 0, batchOpen: false, lastKillX: 0, bear: null, bearDone: false, shake: 0, mode: 'normal', lives: 3 };
+const particles = [], popups = [];
+const quotaFor = r => Math.min(9, 5 + Math.ceil(r / 2));
+const palette = () => PALETTES[(G.state === 'title' || G.state === 'calib') ? 1 : (G.round - 1) % PALETTES.length];
+
+function popup(x, y, text, color, life = 1){ popups.push({ x, y, text, color, life, max: life }); }
+
+class Duck {
+  constructor(round, ambient = false){
+    this.golden = !ambient && Math.random() < 0.08;
+    this.r = Math.max(24, H * 0.042) * (this.golden ? 0.85 : 1);
+    this.speed = Math.min(H * 0.7, H * (0.26 + 0.035 * (round - 1))) * (this.golden ? 1.35 : 1);
+    this.x = rand(0.15, 0.85) * W; this.y = GRASS + this.r;
+    const a = rand(-2.45, -0.7);
+    this.vx = Math.cos(a) * this.speed; this.vy = Math.sin(a) * this.speed;
+    this.face = this.vx < 0 ? -1 : 1;
+    this.state = 'fly'; this.t = 0; this.anim = rand(0, 6); this.spin = 0;
+    this.life = ambient ? rand(6, 9) : clamp(7 - 0.25 * (round - 1), 4, 7);
+    this.turn = rand(0.6, 1.2); this.quackT = rand(0.5, 2.5);
+    this.risen = false; this.done = false; this.ambient = ambient;
+  }
+  update(dt){
+    this.t += dt; this.anim += dt;
+    if (this.state === 'fly'){
+      if (this.risen){
+        this.turn -= dt;
+        if (this.turn <= 0){
+          this.turn = rand(0.5, 1.3);
+          const ang = Math.atan2(this.vy, this.vx) + rand(-1.0, 1.0);
+          this.vx = Math.cos(ang) * this.speed; this.vy = Math.sin(ang) * this.speed;
+        }
+      }
+      this.x += this.vx * dt; this.y += this.vy * dt;
+      if (this.x < this.r){ this.x = this.r; this.vx = Math.abs(this.vx); }
+      if (this.x > W - this.r){ this.x = W - this.r; this.vx = -Math.abs(this.vx); }
+      const top = this.r + H * 0.1;
+      if (this.y < top){ this.y = top; this.vy = Math.abs(this.vy); }
+      if (!this.risen && this.y < GRASS - this.r * 2.2) this.risen = true;
+      if (this.risen && this.y > GRASS - this.r * 1.3){ this.y = GRASS - this.r * 1.3; this.vy = -Math.abs(this.vy); }
+      this.quackT -= dt; if (this.quackT <= 0){ this.quackT = rand(1.5, 3.5); if (!this.ambient) sfx.quack(0.12); }
+      if (this.t > this.life){
+        this.state = 'escape'; this.vx *= 0.35; this.vy = -this.speed * 1.3;
+        if (!this.ambient){ sfx.quack(0.2); popup(this.x, this.y - this.r * 1.5, 'FLEW AWAY', '#ffffffaa', 0.9); }
+      }
+      if (Math.abs(this.vx) > 1) this.face = this.vx < 0 ? -1 : 1;
+    } else if (this.state === 'escape'){
+      this.x += this.vx * dt; this.y += this.vy * dt;
+      if (this.y < -this.r * 3){ this.done = true; if (!this.ambient && G.state === 'playing') G.tally.push('miss'); }
+    } else if (this.state === 'hit'){
+      if (this.t > 0.35){ this.state = 'fall'; this.vy = H * 0.15; }
+    } else if (this.state === 'fall'){
+      this.vy += H * 1.6 * dt; this.y += this.vy * dt; this.spin += dt * 9;
+      if (this.y > GRASS + this.r * 1.5){ this.done = true; sfx.thud(); }
+    }
+  }
+  draw(now){
+    if (RETRO) return drawDuckRetro(this);
+    const r = this.r;
+    ctx.save(); ctx.translate(this.x, this.y);
+    if (this.state === 'fall') ctx.rotate(Math.PI / 2 * this.face + Math.sin(this.spin) * 0.4);
+    ctx.scale(this.face, 1);
+    const body = this.golden ? '#f5c542' : '#7a5a3f', belly = this.golden ? '#ffe9a3' : '#b8a48a';
+    const head = this.golden ? '#ff8c1a' : '#1f7a4d', wingC = this.golden ? '#d9a21f' : '#5b4230';
+    if (this.golden){ ctx.shadowColor = '#ffd84d'; ctx.shadowBlur = 18; }
+    // tail
+    ctx.fillStyle = wingC; ctx.beginPath(); ctx.moveTo(-r*0.85, -r*0.1); ctx.lineTo(-r*1.35, -r*0.35); ctx.lineTo(-r*1.25, r*0.15); ctx.closePath(); ctx.fill();
+    // body
+    ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(0, 0, r, r*0.62, 0, 0, Math.PI*2); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = belly; ctx.beginPath(); ctx.ellipse(r*0.1, r*0.22, r*0.7, r*0.32, 0, 0, Math.PI*2); ctx.fill();
+    // head + neck ring
+    ctx.fillStyle = head; ctx.beginPath(); ctx.arc(r*0.85, -r*0.5, r*0.42, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = Math.max(2, r*0.08);
+    ctx.beginPath(); ctx.arc(r*0.85, -r*0.5, r*0.42, Math.PI*0.55, Math.PI*0.95); ctx.stroke();
+    // beak
+    ctx.fillStyle = '#ffb020'; ctx.beginPath(); ctx.moveTo(r*1.18, -r*0.58); ctx.lineTo(r*1.65, -r*0.45); ctx.lineTo(r*1.18, -r*0.34); ctx.closePath(); ctx.fill();
+    // eye
+    const ex = r*0.98, ey = -r*0.6;
+    if (this.state === 'hit' || this.state === 'fall'){
+      ctx.strokeStyle = '#111'; ctx.lineWidth = Math.max(2, r*0.07); const s = r*0.1;
+      ctx.beginPath(); ctx.moveTo(ex-s, ey-s); ctx.lineTo(ex+s, ey+s); ctx.moveTo(ex+s, ey-s); ctx.lineTo(ex-s, ey+s); ctx.stroke();
+    } else { ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(ex, ey, r*0.08, 0, Math.PI*2); ctx.fill(); }
+    // wing (flaps while flying)
+    const flap = (this.state === 'fly' || this.state === 'escape') ? Math.sin(this.anim * 18) : (this.state === 'hit' ? -1 : 0.3);
+    ctx.save(); ctx.translate(-r*0.1, -r*0.15); ctx.rotate(-0.7 * flap);
+    ctx.fillStyle = wingC; ctx.beginPath(); ctx.ellipse(-r*0.3, -r*0.15, r*0.68, r*0.28, -0.2, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+    ctx.restore();
+  }
+}
+
+
+// ---------- the bear: runs toward the camera, takes 5 hits, growls ----------
+const BEAR_HITS = 5;
+function bearParts(frame, open){
+  const F = '#7a4a1e', D = '#4a2a0e', L = '#c08840', K = '#000', W_ = '#fcfcfc', R = '#d82800';
+  const a = frame ? 3 : 0, b = frame ? 0 : 3;                       // arm swing
+  return [
+    [-11, -17 + a, 3, 9, F], [-11, -9 + a, 3, 1, W_], [8, -17 + b, 3, 9, F], [8, -9 + b, 3, 1, W_],   // arms + claws
+    [-8, -17, 16, 12, F], [-4, -15, 8, 8, L],                                                           // body + belly
+    [-6, -5, 4, frame ? 5 : 3, D], [2, -5, 4, frame ? 3 : 5, D],                                         // legs
+    [-5, -26, 10, 9, F], [-7, -27, 3, 3, D], [4, -27, 3, 3, D],                                          // head + ears
+    [-3, -21, 6, 4, L], [-1, -21, 2, 1, K],                                                              // snout + nose
+    [-4, -24, 2, 1, W_], [-3, -24, 1, 1, K], [2, -24, 2, 1, W_], [2, -24, 1, 1, K],                      // eyes
+    [-4, -25, 3, 1, K], [1, -25, 3, 1, K],                                                               // angry brows
+    [-2, -18, 4, open ? 3 : 1, R], [-2, -18, 1, 1, W_], [1, -18, 1, 1, W_]                               // mouth + fangs
+  ];
+}
+class Bear {
+  constructor(){
+    this.t = 0; this.T = G.mode === 'bears' ? Math.max(3.4, 6.2 - 0.4 * G.round) : Math.max(4.6, 7.4 - 0.35 * G.round);      // seconds to reach the camera
+    this.x0 = rand(0.3, 0.7) * W; this.sway = rand(0.5, 1.5);
+    this.hp = BEAR_HITS; this.state = 'run'; this.st = 0; this.flash = 0; this.growlT = 0.9; this.k = 0;
+    this.x = this.x0; this.y = GRASS; this.u = 2; this.hits = {};
+  }
+  geom(){
+    const k = this.k, u = Math.max(2, Math.round(PX * (1.1 + 4.2 * k * k)));
+    this.u = u; this.x = this.x0 + Math.sin(this.t * 2.2 * this.sway) * W * 0.03 * (0.4 + k);
+    this.y = GRASS + u * 1 + (H * 0.97 - GRASS - u) * k;
+  }
+  hitTest(ax, ay){ if (this.state !== 'run') return false; const u = this.u; return Math.abs(ax - this.x) < u * 9 && ay > this.y - u * 27 && ay < this.y; }
+  hit(p){
+    this.hp--; this.flash = 0.12; this.hits[p.name] = (this.hits[p.name] || 0) + 1; this.t = Math.max(0, this.t - 0.25);   // each hit knocks it back a little
+    p.score += 100; sfx.hit(); sfx.growl(0.5); popup(this.x, this.y - this.u * 30, `${BEAR_HITS - this.hp}/${BEAR_HITS}`, '#fff', 0.8);
+    if (this.hp <= 0){
+      this.state = 'dead'; this.st = 0; p.score += 1000; p.hits++;
+      popup(this.x, this.y - this.u * 34, 'BEAR DOWN +1000', '#ffe27a', 1.6); sfx.jingle([392, 330, 262, 196]); G.flash = 0.15;
+    }
+  }
+  update(dt){
+    this.flash = Math.max(0, this.flash - dt);
+    if (this.state === 'run'){
+      this.t += dt; this.k = clamp(this.t / this.T, 0, 1); this.geom();
+      this.growlT -= dt; if (this.growlT <= 0){ this.growlT = rand(1.2, 2.0); sfx.growl(0.4 + this.k * 0.8); }
+      if (this.k >= 1){                                             // it reached you
+        this.state = 'attack'; this.st = 0; G.shake = 0.7; G.flash = 0.2; sfx.growl(1.6);
+        popup(W / 2, H * 0.4, 'BEAR ATTACK!', '#f87171', 1.6);
+        for (const p of PLIST) if (p.joined || present(p)){ p.ammo = 0; p.combo = 0; }
+        if (G.mode === 'bears'){
+          G.lives--;
+          if (G.lives <= 0){ G.state = 'gameover'; G.stateT = 0; sfx.jingle([392, 330, 262, 196]);
+            const best = Math.max(...PLIST.map(q => q.score)); if (best > G.high){ G.high = best; store.set('duckquest.high', best); } }
+        }
+      }
+    } else if (this.state === 'attack'){ this.st += dt; if (this.st > 0.9) this.done = true; }
+    else if (this.state === 'dead'){ this.st += dt; if (this.st > 1.3) this.done = true; }
+  }
+  draw(front){
+    if (this.state === 'attack') return;
+    if ((this.k >= 0.3) !== front) return;                           // far: behind the grass, close: in front of it
+    const u = this.u, dead = this.state === 'dead';
+    let y = this.y + (dead ? this.st * u * 20 : 0);
+    const frame = Math.floor(this.t * 7) % 2, open = !dead && (Math.floor(this.t * 3) % 3 === 0 || this.flash > 0);
+    ctx.save();
+    if (dead) ctx.globalAlpha = clamp(1 - this.st / 1.3, 0, 1);
+    rects(bearParts(frame, open), this.x, y, u);
+    if (this.flash > 0){ ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.6; rects(bearParts(frame, true).map(r => [r[0], r[1], r[2], r[3], '#fff']), this.x, y, u); }
+    ctx.restore();
+    if (!dead) for (let i = 0; i < BEAR_HITS; i++) rects([[0, 0, 2, 2, i < this.hp ? '#f83800' : '#303030']], this.x + (i - 2) * u * 3, y - u * 31, u);   // hit points
+  }
+}
+
+
+// ---------- menu: shoot an item (or D-pad / arrows + Start/Enter) ----------
+const MENUS = { main: ['NORMAL GAME', 'SPECIALS', 'PRINCESS PARTY', 'CALIBRATE'], specials: ['BEAR HUNT', 'BACK'] };
+const MENU = { id: 'main', sel: 0, boxes: [] };
+const menuItems = () => MENUS[MENU.id];
+function openMenu(id = 'main'){ G.state = 'menu'; MENU.id = id; MENU.sel = 0; MENU.boxes = []; }
+function menuActivate(i, p){
+  const it = menuItems()[i]; if (!it) return;
+  sfx.hit();
+  if (it === 'NORMAL GAME'){ G.mode = 'normal'; startGame(); }
+  else if (it === 'SPECIALS') openMenu('specials');
+  else if (it === 'PRINCESS PARTY'){ G.mode = 'party'; startGame(); }
+  else if (it === 'CALIBRATE') calibrateFor(p && p.name !== 'mouse' ? p.name : 'left');
+  else if (it === 'BEAR HUNT'){ G.mode = 'bears'; startGame(); }
+  else if (it === 'BACK') openMenu('main');
+}
+const menuBoxAt = (x, y) => MENU.boxes.findIndex(b => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h);
+function menuShoot(p){
+  const i = p.hasAim && !offscreen(p) ? menuBoxAt(p.nx * W, p.ny * H) : -1;
+  if (i >= 0){ MENU.sel = i; menuActivate(i, p); }
+  else if (p.name === 'mouse') menuActivate(MENU.sel, p);          // mouse / Deck pad: activate the highlighted item
+}
+function menuKey(k){
+  const n = menuItems().length;
+  if (k === 'arrowup'){ MENU.sel = (MENU.sel + n - 1) % n; sfx.reload(); return true; }
+  if (k === 'arrowdown'){ MENU.sel = (MENU.sel + 1) % n; sfx.reload(); return true; }
+  if (k === 'enter' || k === ' '){ menuActivate(MENU.sel, null); return true; }
+  if (k === 'escape'){ if (MENU.id !== 'main') openMenu('main'); else G.state = 'title'; return true; }
+  return false;
+}
+function drawMenu(now){
+  const fs = Math.max(18, H * 0.04), bw = Math.min(W * 0.52, 900), bh = H * 0.1, gap = H * 0.025, items = menuItems();
+  const u = Math.max(PX, Math.round(W * 0.0055 / PX) * PX);
+  pixelWord('DUCK', W / 2 - u * 15, H * 0.13, u, NES.orange, NES.black); pixelWord('QUEST', W / 2 + u * 15, H * 0.13, u, NES.orange, NES.black);
+  const y0 = H * 0.27; MENU.boxes = [];
+  items.forEach((it, i) => {
+    const x = W / 2 - bw / 2, y = y0 + i * (bh + gap);
+    MENU.boxes.push({ x, y, w: bw, h: bh });
+    for (const p of PLIST) if (present(p, now) && p.hasAim && !offscreen(p) && p.name !== 'mouse' && menuBoxAt(p.nx * W, p.ny * H) === i) MENU.sel = i;   // hover selects
+    const mouse = players.mouse; if (mouse.hasAim && present(mouse, now) && menuBoxAt(mouse.nx * W, mouse.ny * H) === i) MENU.sel = i;
+    const sel = i === MENU.sel;
+    retroBox(x, y, bw, bh);
+    if (sel){ ctx.strokeStyle = NES.orange; ctx.lineWidth = Math.max(3, PX); ctx.strokeRect(x + PX * 2, y + PX * 2, bw - PX * 4, bh - PX * 4); }
+    text((sel ? '> ' : '  ') + it + (sel ? ' <' : '  '), W / 2, y + bh / 2, fs, sel ? NES.orange : NES.white, 'center', 900);
+  });
+  text(MENU.id === 'main' ? 'SHOOT A CHOICE  -  OR D-PAD + START' : 'SHOOT A CHOICE  -  BACK TO RETURN', W / 2, H * 0.93, fs * 0.5, 'rgba(255,255,255,.75)', 'center', 700);
+}
+
+
+// ---------- princess party: balloons rise, princesses let them fly ----------
+const LEVELS = [
+  { name: 'THE GARDEN',      sky: '#3cbcfc', princesses: [0.35, 0.65],             interval: 2.6, bunch: [3, 5], speed: 1.0,  quota: 25, time: 60, gold: 0.05 },
+  { name: 'RAINBOW MEADOW',  sky: '#fcc0e0', princesses: [0.3, 0.5, 0.7],          interval: 2.2, bunch: [4, 6], speed: 1.15, quota: 40, time: 60, gold: 0.07 },
+  { name: 'THE CASTLE',      sky: '#b8a0f8', princesses: [0.22, 0.4, 0.6, 0.78],   interval: 1.9, bunch: [4, 7], speed: 1.3,  quota: 60, time: 60, gold: 0.08 },
+  { name: 'BIRTHDAY PARTY!', sky: '#1c1c6c', stars: true, princesses: [0.2, 0.38, 0.5, 0.62, 0.8], birthday: true, interval: 1.5, bunch: [5, 8], speed: 1.35, quota: 80, time: 70, gold: 0.1 }
+];
+const BALLOON_COLORS = ['#f83800', '#fcb800', '#00a800', '#3cbcfc', '#d838f8', '#fc74b4', '#fcfcfc', '#80d010'];
+const PRINCESS_PALS = [
+  { dress: '#fc74b4', hem: '#d82800', hair: '#fcb800' }, { dress: '#3cbcfc', hem: '#2038ec', hair: '#683000' },
+  { dress: '#b8a0f8', hem: '#8040d0', hair: '#181818' }, { dress: '#80d010', hem: '#00a800', hair: '#d86030' }
+];
+const BIRTHDAY_PAL = { dress: '#ffd84d', hem: '#f87800', hair: '#fcb800' };
+const BDAY_NAME = ((new URLSearchParams(location.search).get('name')) || 'PRINCESS').toUpperCase().slice(0, 14);
+const HB_TUNE = [[392, .75], [392, .25], [440, 1], [392, 1], [523, 1], [494, 2], [392, .75], [392, .25], [440, 1], [392, 1], [587, 1], [523, 2],
+                 [392, .75], [392, .25], [784, 1], [659, 1], [523, 1], [494, 1], [440, 2], [698, .75], [698, .25], [659, 1], [523, 1], [587, 1], [523, 2]];
+const pick = a => a[Math.floor(Math.random() * a.length)];
+
+function princessParts(frame, pal, crownGlow){
+  const SK = '#f8c8a0', K = '#000', C = '#ffd84d';
+  const arms = frame ? [[-8, -26, 2, 9, SK], [6, -26, 2, 9, SK]] : [[-7, -19, 2, 6, pal.dress], [5, -19, 2, 6, pal.dress], [-7, -13, 2, 2, SK], [5, -13, 2, 2, SK]];
+  return [
+    [-4, -27, 8, 3, pal.hair], [-4, -24, 2, 7, pal.hair], [2, -24, 2, 7, pal.hair],            // hair
+    [-3, -24, 6, 6, SK], [-2, -22, 1, 1, K], [1, -22, 1, 1, K], [-1, -19, 2, 1, '#d82800'],      // face
+    [-3, -29, 6, 2, C], [-3, -31, 1, 2, C], [-1, -30, 2, 1, C], [2, -31, 1, 2, C],              // crown
+    [-3, -18, 6, 3, pal.dress], [-4, -15, 8, 3, pal.dress], [-6, -12, 12, 4, pal.dress],         // bodice + skirt
+    [-8, -8, 16, 5, pal.dress], [-9, -3, 18, 3, pal.hem], [-1, -15, 2, 12, pal.hem],
+    ...arms
+  ].concat(crownGlow ? [[-6, -32, 1, 1, '#fff'], [5, -33, 1, 1, '#fff'], [0, -34, 1, 1, '#fff']] : []);
+}
+class Balloon {
+  constructor(x, y, spd, golden){
+    this.x = x; this.y = y; this.vy = -spd; this.vx = rand(-18, 18) * H / 1000; this.ph = rand(0, 6.28); this.t = 0;
+    this.golden = golden; this.col = golden ? '#ffd84d' : pick(BALLOON_COLORS); this.r = Math.max(20, H * 0.036) * (golden ? 1.3 : 1);
+    this.state = 'fly'; this.done = false;
+  }
+  update(dt){
+    this.t += dt;
+    if (this.state === 'fly'){ this.x += (this.vx + Math.sin(this.t * 1.8 + this.ph) * H * 0.045) * dt; this.y += this.vy * dt; if (this.y < -this.r * 4) this.done = true; }
+    else this.done = true;
+  }
+  hitDist(ax, ay){ return this.state === 'fly' ? Math.hypot(ax - this.x, ay - this.y) : 1e9; }
+  draw(now){
+    const u = Math.max(2, Math.round(this.r / 5.5)), c = this.col;
+    const body = [[-3, -6, 6, 1, c], [-4, -5, 8, 1, c], [-5, -4, 10, 6, c], [-4, 2, 8, 1, c], [-3, 3, 6, 1, c], [-2, 4, 4, 1, c], [-1, 5, 2, 1, '#00000055'],
+                  [-4, -4, 2, 2, '#ffffff99'], [-3, -3, 1, 1, '#ffffffcc']];
+    const sw = Math.sin(this.t * 3 + this.ph);
+    rects([[Math.round(sw), 6, 1, 4, '#e8e8e8'], [Math.round(-sw), 10, 1, 4, '#e8e8e8'], [Math.round(sw), 14, 1, 4, '#e8e8e8']], this.x, this.y, u);
+    rects(body, this.x, this.y, u);
+    if (this.golden && Math.floor(now / 120) % 2 === 0) rects([[-7, -2, 1, 1, '#fff'], [6, 1, 1, 1, '#fff'], [0, -9, 1, 1, '#fff']], this.x, this.y, u);
+  }
+}
+function setupParty(){
+  const lv = LEVELS[Math.min(G.round, LEVELS.length) - 1], pu = Math.max(3, Math.round(PX * 1.7));
+  G.party = { lv, popped: 0, timeLeft: lv.time, t: 0, pu, princesses: [], fire: 0 };
+  lv.princesses.forEach((fx, i) => {
+    const bday = lv.birthday && i === 2;
+    G.party.princesses.push({ x: fx * W, y: GRASS + pu * 2, timer: 0.4 + i * 0.45, anim: rand(0, 6), arm: 0, pal: bday ? BIRTHDAY_PAL : PRINCESS_PALS[i % PRINCESS_PALS.length], big: bday });
+  });
+  G.balloons = []; G.ducks = []; G.dog = null; G.bear = null; G.tally = []; G.retry = false;
+  setSky(lv.sky, lv.stars);
+  for (const p of PLIST){ p.ammo = MAX_AMMO; p.mgAcc = 0; }
+  G.state = 'roundIntro'; G.stateT = 0; sfx.jingle([392, 523, 659, 784]);
+}
+function partyUpdate(dt, now){
+  const P = G.party; if (!P) return;
+  P.t += dt;
+  for (const p of PLIST){ p.ammo = MAX_AMMO; p.mgAcc = 0; }               // balloons: no reloading
+  for (const pr of P.princesses){
+    pr.anim += dt; pr.arm = Math.max(0, pr.arm - dt); pr.timer -= dt;
+    if (pr.timer <= 0){
+      pr.timer = P.lv.interval * rand(0.8, 1.3) / (pr.big ? 1.5 : 1); pr.arm = 0.5; sfx.whoosh();
+      const n = Math.round(rand(P.lv.bunch[0], P.lv.bunch[1] + 0.99)) + (pr.big ? 2 : 0), pu = (pr.big ? 1.5 : 1) * P.pu;
+      for (let i = 0; i < n; i++) G.balloons.push(new Balloon(pr.x + rand(-2, 2) * pu * 3, pr.y - pu * 30 - rand(0, 20), H * 0.16 * P.lv.speed * rand(0.8, 1.25), Math.random() < P.lv.gold));
+    }
+  }
+  for (const b of G.balloons) b.update(dt);
+  G.balloons = G.balloons.filter(b => !b.done);
+  if (G.state === 'playing'){ P.timeLeft -= dt; if (P.timeLeft <= 0) partyEnd(); }
+}
+function partyEnd(){
+  const P = G.party, ok = P.popped >= P.lv.quota;
+  G.retry = !ok; G.state = 'roundClear'; G.stateT = 0;
+  if (ok && G.round >= LEVELS.length){ G.state = 'finale'; G.stateT = 0; G.fireT = 0; sfx.tune(HB_TUNE); return; }
+  sfx.jingle(ok ? [523, 659, 784, 1047] : [392, 349, 330, 294]);
+}
+function popBalloon(b, p, chain = false){
+  if (b.state !== 'fly') return 0;
+  b.state = 'pop';
+  const mult = 1 + 0.25 * Math.min(p.combo, 6);
+  const pts = b.golden ? 100 : Math.round(10 * mult / 10) * 10 || 10;
+  p.score += pts; if (!chain) p.combo++; p.hits++; G.party && G.party.popped++;
+  for (let i = 0; i < 12; i++) particles.push({ x: b.x, y: b.y, vx: rand(-170, 170), vy: rand(-200, 60), rot: 0, vr: 0, life: rand(0.5, 1.0), color: b.golden ? pick(['#ffd84d', '#fff', '#f8b800']) : pick([b.col, '#fff', b.col]), conf: true });
+  if (!chain){ popup(b.x, b.y - b.r, `+${pts}`, b.golden ? '#ffd84d' : '#fff', 0.7); b.golden ? sfx.sparkle() : sfx.pop(); }
+  if (b.golden && !chain){ for (const o of G.balloons) if (o !== b) popBalloon(o, p, true); popup(W / 2, H * 0.3, 'GOLDEN BALLOON!', '#ffd84d', 1.4); G.flash = 0.12; }
+  return pts;
+}
+function popAt(ax, ay, p){
+  let best = null, bd = 1e9;
+  for (const b of G.balloons){ const d = b.hitDist(ax, ay); if (d < b.r * 1.3 && d < bd){ bd = d; best = b; } }
+  if (best){ popBalloon(best, p); return true; }
+  return false;
+}
+function partyHUD(bar, fs){
+  const P = G.party; if (!P) return;
+  const t = Math.max(0, Math.ceil(P.timeLeft));
+  text(`POP ${P.popped}/${P.lv.quota}   TIME ${t}`, W / 2, bar + fs * 0.9, fs, t <= 10 ? '#f87858' : NES.white, 'center');
+}
+function partyDraw(now){
+  const P = G.party; if (!P) return;
+  const lv = P.lv;
+  if (lv.birthday){                                                        // bunting across the top
+    const u = Math.max(3, PX), cols = ['#f83800', '#fcb800', '#3cbcfc', '#80d010', '#d838f8'];
+    for (let x = 0, i = 0; x < W; x += u * 10, i++){ const y = H * 0.045 + Math.sin(x / W * Math.PI * 3) * H * 0.012; rects([[0, 0, 8, 1, '#ddd'], [1, 1, 6, 2, cols[i % 5]], [2, 3, 4, 2, cols[i % 5]], [3, 5, 2, 1, cols[i % 5]]], x, y, u); }
+  }
+  for (const pr of P.princesses){
+    const u = Math.round(P.pu * (pr.big ? 1.5 : 1)), bob = Math.round(Math.sin(pr.anim * 3) * 1);
+    rects(princessParts(pr.arm > 0 ? 1 : (Math.floor(pr.anim * 2) % 2), pr.pal, pr.big), pr.x, pr.y + bob * u * 0.3, u);
+  }
+  for (const b of G.balloons) b.draw(now);
+}
+function partyFinale(dt, now){
+  G.fireT = (G.fireT || 0) - dt;
+  if (G.fireT <= 0){                                                       // fireworks
+    G.fireT = 0.35; const fx = rand(0.15, 0.85) * W, fy = rand(0.12, 0.45) * H, col = pick(BALLOON_COLORS);
+    for (let i = 0; i < 26; i++){ const a = i / 26 * 6.283, v = rand(120, 260); particles.push({ x: fx, y: fy, vx: Math.cos(a) * v, vy: Math.sin(a) * v, rot: 0, vr: 0, life: rand(0.8, 1.4), color: col, conf: true }); }
+    sfx.pop();
+  }
+  if (Math.random() < dt * 14) particles.push({ x: rand(0, W), y: -10, vx: rand(-30, 30), vy: rand(60, 140), rot: 0, vr: 0, life: 3, color: pick(BALLOON_COLORS), conf: true });
+  partyUpdate(dt, now);
+  if (G.stateT > 22){ G.state = 'title'; setSky(NES.sky, false); }
+}
+function drawFinale(now){
+  const fs = Math.max(18, H * 0.05), pulse = 0.85 + 0.15 * Math.sin(now / 200);
+  ctx.fillStyle = 'rgba(8,8,40,.62)'; ctx.fillRect(0, H * 0.1, W, H * 0.36);          // calm backing so the words read over the balloons
+  text('HAPPY BIRTHDAY', W / 2, H * 0.2, fs * 1.9 * pulse, '#ffd84d', 'center', 900);
+  text(BDAY_NAME + '!', W / 2, H * 0.3, fs * 1.9 * pulse, '#fc74b4', 'center', 900);
+  text('YOU POPPED ALL THE BALLOONS!', W / 2, H * 0.4, fs * 0.7, '#fff', 'center', 800);
+  // cake in front of the birthday princess
+  const u = Math.max(3, PX * 1.5 | 0), cx = W * 0.5 + (G.party ? 0 : 0), cy = GRASS + u * 2;
+  rects([[-9, -6, 18, 6, '#fc74b4'], [-9, -6, 18, 1, '#fff'], [-7, -11, 14, 5, '#fcfcfc'], [-7, -7, 14, 1, '#f8b8b8'], [-1, -15, 2, 4, '#3cbcfc'], [-6, -13, 2, 2, '#f83800'], [4, -13, 2, 2, '#f83800'], [-1, -17, 2, 2, Math.floor(now / 150) % 2 ? '#ffd84d' : '#f87800']], cx + W * 0.13, cy, u);
+}
+
+const BEARS_PER_ROUND = r => 3 + (r >= 3 ? 1 : 0) + (r >= 6 ? 1 : 0);
+function bearsUpdate(dt){
+  if (G.bear) return;
+  if (G.spawned >= BEARS_PER_ROUND(G.round)){ G.state = 'roundClear'; G.stateT = 0; G.perfect = false; sfx.jingle([523, 659, 784, 1047]); return; }
+  G.batchDelay -= dt;
+  if (G.batchDelay <= 0){ G.bear = new Bear(); G.spawned++; G.batchDelay = 1.3; sfx.growl(1.2); popup(W / 2, H * 0.35, `BEAR ${G.spawned}/${BEARS_PER_ROUND(G.round)}`, '#ffb703', 1.2); }
+}
+function startGame(){
+  for (const p of PLIST){ p.score = 0; p.combo = 0; p.hits = 0; p.shots = 0; p.ammo = MAX_AMMO; p.joined = present(p); }
+  G.round = 1; G.lives = 3; startRound();
+}
+function startRound(){
+  if (G.mode === 'party'){ setupParty(); return; }
+  setSky(NES.sky, false);
+  G.spawned = 0; G.ducks = []; G.tally = []; G.batchDelay = 0.4; G.perfect = false; G.dog = null; G.batchOpen = false; G.bear = null; G.bearDone = false;
+  for (const p of PLIST) p.ammo = MAX_AMMO;
+  G.state = 'roundIntro'; G.stateT = 0;
+  sfx.jingle([392, 523, 659, 784]);
+}
+function endRound(){
+  const hits = G.tally.filter(t => t === 'hit').length;
+  G.stateT = 0;
+  if (hits >= quotaFor(G.round)){
+    G.perfect = hits === DUCKS_PER_ROUND;
+    if (G.perfect) for (const p of PLIST) if (p.joined){ p.score += 1000; }
+    G.state = 'roundClear'; sfx.jingle([523, 659, 784, 1047]);
+  } else {
+    G.state = 'gameover'; sfx.jingle([392, 330, 262, 196]);
+    const best = Math.max(...PLIST.map(p => p.score));
+    if (best > G.high){ G.high = best; store.set('duckquest.high', best); }
+  }
+}
+
+function killDuck(d, p){
+  d.state = 'hit'; d.t = 0; G.lastKillX = d.x;
+  const mult = 1 + 0.25 * Math.min(p.combo, 6);
+  const pts = Math.round((d.golden ? 500 : 100) * mult / 10) * 10;
+  p.score += pts; p.combo++; p.hits++;
+  if (G.state === 'playing') G.tally.push('hit');
+  for (let i = 0; i < 14; i++) particles.push({ x: d.x, y: d.y, vx: rand(-160, 160), vy: rand(-220, 40), rot: rand(0, 6), vr: rand(-6, 6), life: rand(0.8, 1.5), color: d.golden ? '#ffe27a' : (Math.random() < 0.5 ? '#b8a48a' : '#7a5a3f') });
+  popup(d.x, d.y - d.r, `+${pts}${p.combo > 1 ? `  x${mult.toFixed(2).replace(/\.?0+$/, '')}` : ''}`, p.color, 1.1);
+  sfx.hit(); haptic(p, 1.0, 90);
+}
+
+function shoot(p){
+  if (offscreen(p)){
+    if (p.ammo < MAX_AMMO){ p.ammo = MAX_AMMO; sfx.reload(); haptic(p, 0.5, 40);
+      popup(clamp(p.nx * W, 80, W - 80), clamp(p.ny * H, 60, H - 60), 'RELOADED', p.color, 0.8); }
+    return;
+  }
+  if (p.ammo <= 0){ sfx.empty(); haptic(p, 0.15, 20); return; }
+  const sg = p.weapon === 'shotgun', mg = p.weapon === 'mg', nowMs = performance.now();
+  if (sg && nowMs - p.lastShot < 450) return;                 // shotgun pumps slower
+  if (mg && nowMs - p.lastShot < 85) return;                  // machine gun: ~12 shots/s while the trigger is held
+  p.lastShot = nowMs;
+  if (mg){ if (++p.mgAcc >= 4){ p.mgAcc = 0; p.ammo--; } }   // one ammo icon = 4 bullets
+  else p.ammo--;
+  p.shots += sg ? 3 : 1; p.muzzle = sg ? 0.2 : mg ? 0.05 : 0.12; G.flash = sg ? 0.08 : mg ? 0 : 0.05;
+  sfx.shot(); if (sg) setTimeout(() => sfx.shot(), 30); haptic(p, sg ? 0.8 : mg ? 0.2 : 0.35, sg ? 60 : mg ? 15 : 25);
+  const S = H * 0.07;                                          // shotgun spread (px)
+  const J = H * 0.014;                                         // machine gun jitter
+  const pellets = sg ? [[0, 0], [-S, -S * 0.35 + rand(-8, 8)], [S, S * 0.35 + rand(-8, 8)]] : mg ? [[rand(-J, J), rand(-J, J)]] : [[0, 0]];
+  let hit = false;
+  for (const [ox, oy] of pellets){
+    const ax = p.nx * W + ox, ay = p.ny * H + oy;
+    let best = null, bd = 1e9;
+    for (const d of G.ducks){
+      if (d.state !== 'fly' && d.state !== 'escape') continue;
+      const dd = Math.hypot(d.x - ax, d.y - ay);
+      if (dd < d.r * 1.35 && dd < bd){ bd = dd; best = d; }
+    }
+    if (best){ killDuck(best, p); hit = true; }
+    else if (G.bear && G.bear.hitTest(ax, ay)){ G.bear.hit(p); hit = true; }
+    else if (G.mode === 'party' && popAt(ax, ay, p)) hit = true;
+    else for (let i = 0; i < 5; i++) particles.push({ x: ax, y: ay, vx: rand(-60, 60), vy: rand(-60, 60), rot: 0, vr: 0, life: 0.3, color: '#ffffffaa', dot: true });
+  }
+  if (!hit) p.combo = 0;
+}
+const WEAPONS = { gun: 'PISTOL', shotgun: 'SHOTGUN', mg: 'MACHINE GUN' }, WEAPON_ORDER = ['gun', 'shotgun', 'mg'];
+function toggleWeapon(p){
+  p.weapon = WEAPON_ORDER[(WEAPON_ORDER.indexOf(p.weapon) + 1) % WEAPON_ORDER.length]; p.hold.m = p.hold.pad = p.hold.q = false;
+  sfx.reload(); popup(clamp(p.nx * W, 80, W - 80), clamp(p.ny * H, 60, H - 60) - 40, WEAPONS[p.weapon], p.color, 0.9);
+}
+
+function triggerPressed(p, src = 'm'){
+  sfx.init(); p.hold[src] = true;
+  if (!p.joined && G.state !== 'title') p.joined = true;
+  switch (G.state){
+    case 'calib': calibTrigger(p); break;
+    case 'title':
+      if (!isCalibrated() && p.name !== 'mouse') calibrateFor(p.name); else openMenu();
+      break;
+    case 'menu': menuShoot(p); break;
+    case 'roundIntro': case 'playing': case 'finale': shoot(p); break;
+    case 'gameover': if (G.stateT > 1.5) G.state = 'title'; break;
+  }
+}
+
+// ---------- mouse & keyboard ----------
+addEventListener('mousemove', e => {
+  const p = players.mouse; p.nx = e.clientX / W; p.ny = e.clientY / H; p.hasAim = true; p.lastSeen = performance.now();
+});
+addEventListener('mousedown', e => {
+  sfx.init(); const p = players.mouse; p.lastSeen = performance.now();
+  if (e.button === 0) triggerPressed(p);
+  else if (e.button === 1){ e.preventDefault(); toggleWeapon(p); }
+  else if (e.button === 2 && p.ammo < MAX_AMMO){ p.ammo = MAX_AMMO; sfx.reload(); }
+});
+addEventListener('mouseup', e => { if (e.button === 0) players.mouse.hold.m = false; });
+addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('keydown', e => {
+  sfx.init();
+  const k = e.key.toLowerCase();
+  if (G.state === 'menu' && menuKey(k)){ e.preventDefault(); return; }
+  if (k === 'f'){ if (!document.fullscreenElement) document.documentElement.requestFullscreen?.(); else document.exitFullscreen?.(); }
+  else if (k === 'w' || k === 'tab'){ e.preventDefault(); toggleWeapon(players.mouse); }
+  else if (k === 'v'){ MIRROR = !MIRROR; store.set('duckquest.mirror', MIRROR); popup(W / 2, H * 0.12, MIRROR ? 'MIRRORED VIEW' : 'NORMAL VIEW', '#fff', 0.9); }
+  else if (k === 'm'){ sfx.init(); popup(W / 2, H * 0.12, sfx.music.toggle() ? 'MUSIC ON' : 'MUSIC OFF', '#fff', 0.9); }
+  else if (k === 'g'){ RETRO = !RETRO; store.set('duckquest.retro', RETRO); sfx.music.set(RETRO && sfx.ready()); }
+  else if (k === 'c') startCalib('aim', 'left');          // P1 (left): full calibration
+  else if (k === 'p') startCalib('aim', 'right');         // P2 (right): full calibration with its own corners
+  else if (k === 'k') startFineTune('right');             // P2 (right): bullseye only
+  else if (k === 'j') startFineTune('left');              // P1 (left): bullseye only
+  else if (k === 'b' && G.state === 'playing' && !G.bear){ G.bear = new Bear(); G.bearDone = true; sfx.growl(1.2); }
+  else if (k === '[' || k === ']'){ smoothLevel = clamp(smoothLevel + (k === ']' ? 1 : -1), 0, SMOOTH_MIN.length - 1); store.set('duckquest.smooth', smoothLevel); applySmooth(); popup(W / 2, H * 0.12, `SMOOTHING ${smoothLevel} / ${SMOOTH_MIN.length - 1}`, '#fff', 0.9); }
+  else if (k === 't') startCalib('touch');
+  else if (k === 'd') G.debug = !G.debug;
+  else if (k === 'escape') G.state = 'title';
+  else if (k === 'enter' || k === ' '){
+    if (G.state === 'calib'){ if (CAL.step === CAL.corners.length && CAL.done.size) finishCalib(); else G.state = 'title'; }   // Start/Enter before finishing = skip this controller (what is already saved stays)
+    else if (G.state === 'title' || G.state === 'gameover') openMenu();
+  }
+});
+
+// ---------- gamepad (drives the P3 "mouse" player) ----------
+// Right/left stick aims, RT/RB/A shoots (A also starts), LT/LB/B/X reloads. Deadzone + speed in screen widths/sec.
+const PAD = { held: {}, speed: 0.9, dead: 0.15, remote: null };
+function pollGamepad(dt){
+  let pads = Array.from(navigator.getGamepads ? navigator.getGamepads() : []);
+  const R = PAD.remote;
+  if (R && performance.now() - R.t < 1500){   // bridge feed (padbridge.py) wins over the browser's own gamepads
+    pads = [{ connected: true, index: 'bridge', mapping: 'standard', axes: R.axes,
+              buttons: Array.from({ length: 16 }, (_, i) => ({ pressed: R.btn.includes(i), value: R.btn.includes(i) ? 1 : 0 })) }];
+  }
+  const p = players.mouse;
+  for (const gp of pads){
+    if (!gp || !gp.connected) continue;
+    const ax = (a, b) => { const x = gp.axes[a] || 0, y = gp.axes[b] || 0, m = Math.hypot(x, y);
+      return m < PAD.dead ? [0, 0] : [x * (m - PAD.dead) / (1 - PAD.dead) / m, y * (m - PAD.dead) / (1 - PAD.dead) / m]; };
+    const std = gp.mapping === 'standard';
+    const [rx, ry] = std ? ax(2, 3) : ax(3, 4), [lx, ly] = ax(0, 1);
+    const dx = rx || lx, dy = ry || ly;
+    if (dx || dy){
+      p.nx = clamp(p.nx + dx * PAD.speed * dt * (W / H > 1 ? H / W : 1) * 1.0, -0.05, 1.05);
+      p.ny = clamp(p.ny + dy * PAD.speed * dt, -0.05, 1.05);
+      p.hasAim = true; p.lastSeen = performance.now();
+    }
+    const down = i => !!(gp.buttons[i] && (gp.buttons[i].pressed || gp.buttons[i].value > 0.5));
+    const edge = (key, isDown, fn) => { if (isDown && !PAD.held[key]) fn(); PAD.held[key] = isDown; };
+    const id = gp.index;
+    const trig = (i, axis) => std ? down(i) : (gp.axes[axis] || -1) > 0 || down(i);
+    const fireDown = trig(7, 5) || down(5) || down(0);
+    if (!fireDown) p.hold.pad = false;
+    edge(id + 'fire', fireDown, () => { p.lastSeen = performance.now(); p.hasAim = true; triggerPressed(p, 'pad'); });
+    edge(id + 'wpn', down(3), () => toggleWeapon(p));
+    // No keyboard on the Deck: Start = Enter, Back = Esc, D-pad up/left/right/down = C (aim calib) / K (fine-tune one controller) / V (mirror) / D (debug)
+    const key = (k) => dispatchEvent(new KeyboardEvent('keydown', { key: k }));
+    edge(id + 'start', down(9), () => key('Enter'));  edge(id + 'back', down(8), () => key('Escape'));
+    edge(id + 'dup', down(12), () => key(G.state === 'menu' ? 'ArrowUp' : 'c'));       edge(id + 'ddown', down(13), () => key(G.state === 'menu' ? 'ArrowDown' : 'd'));
+    edge(id + 'dleft', down(14), () => key('k'));     edge(id + 'dright', down(15), () => key('v'));
+    edge(id + 'rel', trig(6, 2) || down(4) || down(1) || down(2), () => { if (p.ammo < MAX_AMMO){ p.ammo = MAX_AMMO; sfx.reload(); } });
+  }
+}
+
+// ---------- update ----------
+const PRED = { lead: 0.02, maxAge: 0.12 };   // seconds: constant look-ahead + longest gap bridged by extrapolation
+function update(dt, now){
+  pollGamepad(dt);
+  if (G.state === 'calib' && CAL.seen) for (const n of ['left', 'right']) if (present(players[n], now)) CAL.seen.add(n);
+  for (const n of ['left', 'right']){          // keep the crosshair moving smoothly between (and across gaps in) pose updates
+    const p = players[n]; if (!p.hasAim || !p.poseAt) continue;
+    const age = Math.min((now - p.poseAt) / 1000, PRED.maxAge) + PRED.lead;
+    p.nx = p.bx + p.vx * age; p.ny = p.by + p.vy * age;
+  }
+  G.stateT += dt;
+  G.flash = Math.max(0, G.flash - dt);
+  for (const p of PLIST){
+    p.muzzle = Math.max(0, p.muzzle - dt);
+    if ((p.hold.m || p.hold.pad || p.hold.q) && p.weapon === 'mg' && p.ammo > 0 && (G.state === 'playing' || G.state === 'roundIntro')) shoot(p);
+  }
+  for (const c of clouds){ c.x += c.v * dt; if (c.x > W + 150) c.x = -150; }
+
+  if ((G.state === 'title' || G.state === 'menu') && G.ducks.length < 2 && Math.random() < dt * 0.8) G.ducks.push(new Duck(1, true));
+  if (G.dog){ G.dog.t += dt; if (G.dog.t > 1.5) G.dog = null; }
+  if (G.state === 'roundIntro' && G.stateT > (RETRO ? 2.6 : 1.6)){ G.state = 'playing'; G.stateT = 0; }
+  if (G.state === 'playing' && G.mode === 'bears') bearsUpdate(dt);
+  else if (G.mode === 'party' && (G.state === 'playing' || G.state === 'roundIntro')) partyUpdate(dt, now);
+  else if (G.state === 'playing'){
+    if (G.ducks.length === 0){
+      if (G.dog){ /* wait for the dog */ }
+      else if (RETRO && G.batchOpen){
+        G.batchOpen = false;
+        const hits = G.tally.slice(-G.batchN).filter(x => x === 'hit').length;
+        G.dog = { kind: hits ? 'catch' : 'laugh', n: hits, x: hits ? clamp(G.lastKillX, W * 0.12, W * 0.88) : W * 0.5, t: 0 };
+        sfx.jingle(hits ? [523, 659, 784] : [330, 311, 294, 277]);
+      }
+      else if (G.bear){ /* bear fight: wait */ }
+      else if (G.spawned >= DUCKS_PER_ROUND) endRound();
+      else {
+        G.batchDelay -= dt;
+        if (G.batchDelay <= 0 && !G.bearDone && G.spawned >= 4 && (G.round >= 2 || Math.random() < 0.6)){
+          G.bearDone = true; G.bear = new Bear(); sfx.growl(1.2); popup(W / 2, H * 0.35, 'A BEAR!', '#ffb703', 1.4); G.batchDelay = 0.5;
+        } else if (G.batchDelay <= 0){
+          const quests = ['left', 'right'].filter(n => present(players[n], now)).length;
+          const n = Math.min(quests >= 2 ? 3 : 2, DUCKS_PER_ROUND - G.spawned);
+          for (let i = 0; i < n; i++) G.ducks.push(new Duck(G.round));
+          G.spawned += n; G.batchN = n; G.batchOpen = true; G.batchDelay = 0.9; sfx.quack(0.25);
+        }
+      }
+    }
+  }
+  if (G.state === 'roundClear' && G.stateT > 2.8){ if (G.mode === 'party' && G.retry){ G.retry = false; startRound(); } else { G.round++; startRound(); } }
+  if (G.state === 'finale') partyFinale(dt, now);
+  if (G.state === 'title' || G.state === 'menu') setSky(NES.sky, false);
+
+  for (const d of G.ducks) d.update(dt);
+  G.ducks = G.ducks.filter(d => !d.done);
+  if (G.bear){ G.bear.update(dt); if (G.bear.done) G.bear = null; }
+  G.shake = Math.max(0, G.shake - dt);
+  for (const q of particles){ q.life -= dt; q.x += q.vx * dt; q.y += q.vy * dt; q.vy += (q.dot ? 0 : 260) * dt; q.vx *= 0.98; q.rot += q.vr * dt; }
+  for (let i = particles.length - 1; i >= 0; i--) if (particles[i].life <= 0) particles.splice(i, 1);
+  for (const q of popups){ q.life -= dt; q.y -= 40 * dt; }
+  for (let i = popups.length - 1; i >= 0; i--) if (popups[i].life <= 0) popups.splice(i, 1);
+}
+
+// ---------- render ----------
+function text(s, x, y, size, color, align = 'center', weight = 800, glow = 0){
+  if (RETRO) s = String(s).toUpperCase();
+  ctx.font = font(size, weight); ctx.textAlign = align; ctx.textBaseline = 'middle';
+  if (glow && !RETRO){ ctx.shadowColor = color; ctx.shadowBlur = glow; }
+  if (RETRO){ const d = Math.max(2, Math.round(size * 0.08)); ctx.fillStyle = '#000'; ctx.fillText(s, x + d, y + d); ctx.fillStyle = color; ctx.fillText(s, x, y); return; }
+  ctx.lineWidth = Math.max(3, size * 0.12); ctx.strokeStyle = 'rgba(0,0,0,.55)'; ctx.strokeText(s, x, y);
+  ctx.fillStyle = color; ctx.fillText(s, x, y); ctx.shadowBlur = 0;
+}
+
+function drawWorld(now){
+  const P = palette();
+  const g = ctx.createLinearGradient(0, 0, 0, GRASS);
+  g.addColorStop(0, P.top); g.addColorStop(1, P.bot);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // sun / moon
+  const sx = W * 0.78, sy = H * 0.3, sr = H * 0.07;
+  const sg = ctx.createRadialGradient(sx, sy, sr * 0.5, sx, sy, sr * 3);
+  sg.addColorStop(0, P.sun + 'aa'); sg.addColorStop(1, P.sun + '00');
+  ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(sx, sy, sr * 3, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = P.sun; ctx.beginPath(); ctx.arc(sx, sy, sr, 0, Math.PI * 2); ctx.fill();
+  // clouds
+  ctx.fillStyle = 'rgba(255,255,255,.18)';
+  for (const c of clouds){
+    const s = c.s * H * 0.05;
+    ctx.beginPath(); ctx.ellipse(c.x, c.y, s * 2.2, s * 0.7, 0, 0, Math.PI*2); ctx.ellipse(c.x + s, c.y - s * 0.4, s * 1.2, s * 0.7, 0, 0, Math.PI*2); ctx.fill();
+  }
+  const hill = (pts, col) => { ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(0, H); for (const [x, y] of pts) ctx.lineTo(x, y); ctx.lineTo(W, H); ctx.closePath(); ctx.fill(); };
+  hill(hillsFar, P.far); hill(hillsNear, P.near);
+}
+function drawGrass(now){
+  const P = palette(), t = now / 1000;
+  ctx.fillStyle = P.grass; ctx.fillRect(0, GRASS, W, H - GRASS);
+  ctx.strokeStyle = P.blade; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath();
+  for (const b of blades){
+    if (b.tall) continue;
+    const sway = Math.sin(t * 1.6 + b.ph) * 4;
+    ctx.moveTo(b.x, GRASS + 12); ctx.quadraticCurveTo(b.x + b.lean * 0.3, GRASS - b.h * 0.5, b.x + b.lean + sway, GRASS - b.h);
+  }
+  ctx.stroke();
+  // cattails
+  for (const b of blades){
+    if (!b.tall) continue;
+    const sway = Math.sin(t * 1.2 + b.ph) * 6, tx = b.x + b.lean + sway, ty = GRASS - b.h;
+    ctx.strokeStyle = P.blade; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(b.x, GRASS + 12); ctx.quadraticCurveTo(b.x, GRASS - b.h * 0.5, tx, ty); ctx.stroke();
+    ctx.fillStyle = '#4a3020'; ctx.beginPath(); ctx.ellipse(tx, ty + 10, 5, 14, b.lean * 0.01, 0, Math.PI * 2); ctx.fill();
+  }
+}
+function drawCrosshair(p, now){
+  if (!present(p, now) || !p.hasAim) return;
+  const off = offscreen(p);
+  if (RETRO){ retroCrosshair(p, off); return; }
+  const x = clamp(p.nx * W, 22, W - 22), y = clamp(p.ny * H, 22, H - 22);
+  const R = Math.max(16, H * 0.026) * (1 + p.muzzle * 3);
+  ctx.save(); ctx.globalAlpha = off ? 0.5 : 1;
+  ctx.shadowColor = p.color; ctx.shadowBlur = 14; ctx.strokeStyle = p.color; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - R * 1.6, y); ctx.lineTo(x - R * 0.5, y); ctx.moveTo(x + R * 0.5, y); ctx.lineTo(x + R * 1.6, y);
+  ctx.moveTo(x, y - R * 1.6); ctx.lineTo(x, y - R * 0.5); ctx.moveTo(x, y + R * 0.5); ctx.lineTo(x, y + R * 1.6);
+  ctx.stroke();
+  ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+  if (p.weapon === 'shotgun'){ const S = H * 0.07; for (const sgn of [-1, 1]){ ctx.beginPath(); ctx.arc(x + sgn * S, y + sgn * S * 0.35, 6, 0, Math.PI * 2); ctx.fill(); } }
+  ctx.shadowBlur = 0;
+  text(p.label, x + R * 1.3, y - R * 1.3, Math.max(13, H * 0.018), p.color, 'left', 800);
+  ctx.restore();
+}
+function drawHUD(now){
+  const fs = Math.max(16, H * 0.028);
+  text(`ROUND ${G.round}`, 24, fs * 1.2, fs, '#fff', 'left');
+  text(`HI ${G.high}`, W - 24, fs * 1.2, fs, '#fff', 'right');
+  // tally
+  const n = DUCKS_PER_ROUND, s = Math.max(16, H * 0.026), gap = s * 0.5, tw = n * s + (n - 1) * gap;
+  const tx0 = W / 2 - tw / 2, ty = fs * 1.2, quota = quotaFor(G.round);
+  for (let i = 0; i < n; i++){
+    const st = G.tally[i], cx = tx0 + i * (s + gap) + s / 2;
+    ctx.fillStyle = st === 'hit' ? '#ffe27a' : st === 'miss' ? '#f87171' : 'rgba(255,255,255,.25)';
+    ctx.beginPath(); ctx.ellipse(cx, ty, s / 2, s * 0.36, 0, 0, Math.PI * 2); ctx.fill();
+    if (i === quota - 1){ ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx + s / 2 + gap / 2, ty - s * 0.6); ctx.lineTo(cx + s / 2 + gap / 2, ty + s * 0.6); ctx.stroke(); }
+  }
+  text(`hit ${quota} to advance`, W / 2, ty + s * 1.1, fs * 0.55, 'rgba(255,255,255,.75)', 'center', 600);
+  // player panels
+  const shown = PLIST.filter(p => p.joined || p.score > 0 || present(p, now));
+  const pw = Math.min(320, W / Math.max(1, shown.length) - 20);
+  shown.forEach((p, i) => {
+    const cx = W / 2 + (i - (shown.length - 1) / 2) * (pw + 20), y = H - fs * 2.4;
+    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.beginPath(); ctx.roundRect(cx - pw / 2, y - fs * 0.9, pw, fs * 2.6, 14); ctx.fill();
+    text(`${p.label}  ${p.score}`, cx - pw / 2 + 14, y, fs * 0.9, p.color, 'left');
+    text(WEAPONS[p.weapon], cx, y, fs * 0.5, 'rgba(255,255,255,.7)', 'center', 700);
+    if (p.combo > 1) text(`x${(1 + 0.25 * Math.min(p.combo, 6)).toFixed(2).replace(/\.?0+$/, '')}`, cx + pw / 2 - 14, y, fs * 0.8, '#fff', 'right');
+    const sw = fs * 0.35, sh = fs * 0.75;
+    for (let k = 0; k < MAX_AMMO; k++){
+      ctx.fillStyle = k < p.ammo ? '#e23d3d' : 'rgba(255,255,255,.15)';
+      ctx.beginPath(); ctx.roundRect(cx - pw / 2 + 14 + k * (sw + 6), y + fs * 0.55, sw, sh, 3); ctx.fill();
+    }
+    if (p.ammo === 0 && Math.floor(now / 300) % 2 === 0)
+      text(p.name === 'mouse' ? 'RELOAD: right-click / LT' : 'RELOAD: aim off-screen + trigger', cx + pw / 2 - 14, y + fs * 0.95, fs * 0.5, '#ffb3b3', 'right', 700);
+  });
+}
+function overlay(alpha){ ctx.fillStyle = `rgba(5,8,20,${alpha})`; ctx.fillRect(0, 0, W, H); }
+
+
+// ----- retro menus: 5x7 bitmap logo, NES-style dialog box -----
+const GLYPH = {
+  D: ['11110','10001','10001','10001','10001','10001','11110'], U: ['10001','10001','10001','10001','10001','10001','01110'],
+  C: ['01110','10001','10000','10000','10000','10001','01110'], K: ['10001','10010','10100','11000','10100','10010','10001'],
+  Q: ['01110','10001','10001','10001','10101','10010','01101'], E: ['11111','10000','10000','11110','10000','10000','11111'],
+  S: ['01111','10000','10000','01110','00001','00001','11110'], T: ['11111','00100','00100','00100','00100','00100','00100']
+};
+function pixelWord(word, cx, cy, unit, fill, shadow){
+  const w = word.length * 6 - 1, x0 = Math.round(cx - w * unit / 2), y0 = Math.round(cy - 3.5 * unit);
+  for (const [dx, dy, col] of [[unit, unit, shadow], [0, 0, fill]]){
+    ctx.fillStyle = col;
+    [...word].forEach((ch, i) => GLYPH[ch].forEach((row, ry) => [...row].forEach((v, rx) => {
+      if (v === '1') ctx.fillRect(x0 + (i * 6 + rx) * unit + dx, y0 + ry * unit + dy, unit, unit);
+    })));
+  }
+}
+function retroBox(x, y, w, h){
+  const u = Math.max(2, PX);
+  ctx.fillStyle = '#000'; ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+  ctx.strokeStyle = NES.white; ctx.lineWidth = u; ctx.strokeRect(Math.round(x) + u * 2, Math.round(y) + u * 2, Math.round(w) - u * 4, Math.round(h) - u * 4);
+}
+function drawTitleRetro(now){
+  const u = Math.max(PX, Math.round(W * 0.0085 / PX) * PX), fs = Math.max(16, H * 0.034);
+  pixelWord('DUCK', W / 2, H * 0.14, u, NES.orange, NES.black);
+  pixelWord('QUEST', W / 2, H * 0.14 + u * 9, u, NES.orange, NES.black);
+  const live = now - lastPoseAt < 1000, L = present(players.left, now), R = present(players.right, now);
+  const y0 = H * 0.5;
+  text(live ? `QUEST TRACKING LIVE  L${L ? '+' : '-'} R${R ? '+' : '-'}` : (questCount ? 'QUEST CONNECTED - PRESS START TRACKING' : 'QUEST NOT CONNECTED'),
+       W / 2, y0, fs * 0.8, live ? NES.g2 : '#f8b800', 'center');
+  text(isCalibrated() ? `CALIBRATION OK  P1${calibs.left ? '+' : '-'} P2${calibs.right ? '+' : '-'}` : 'CALIBRATION NEEDED', W / 2, y0 + fs * 1.3, fs * 0.8, isCalibrated() ? NES.g2 : '#f87858', 'center');
+  if (calibWarning) text(calibWarning, W / 2, y0 + fs * 2.6, fs * 0.6, '#f8b8b8', 'center');
+  if (Math.floor(now / 500) % 2 === 0) text(live && !isCalibrated() ? 'PULL TRIGGER TO CALIBRATE' : 'PULL TRIGGER TO START', W / 2, H * 0.66, fs * 1.1, NES.white, 'center');
+  text(`TOP SCORE = ${String(G.high).padStart(6, '0')}`, W / 2, H * 0.73, fs * 0.9, NES.orange, 'center');
+  text('CALIBRATE: C/D-PAD UP = P1 LEFT   K/D-PAD LEFT = P2 RIGHT   (A/X on a controller = that controller)', W / 2, H * 0.78, fs * 0.5, '#f8f8f8', 'center');
+  if (!sfx.ready()) text('(CLICK OR PRESS ANY KEY ONCE TO ENABLE SOUND)', W / 2, H * 0.82, fs * 0.5, '#b8b8b8', 'center');
+}
+function drawTitle(now){
+  if (RETRO){ drawTitleRetro(now); return; }
+  overlay(0.35);
+  const big = Math.min(W * 0.11, H * 0.16);
+  const g = ctx.createLinearGradient(0, H * 0.22, 0, H * 0.36); g.addColorStop(0, '#ffe27a'); g.addColorStop(1, '#ff7a3d');
+  ctx.font = font(big, 900); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  if (RETRO){ ctx.lineWidth = Math.max(4, big * 0.1); ctx.strokeStyle = '#000'; ctx.strokeText('DUCKQUEST', W / 2, H * 0.28); ctx.fillStyle = NES.orange; ctx.fillText('DUCKQUEST', W / 2, H * 0.28); }
+  else { ctx.shadowColor = '#ff7a3d'; ctx.shadowBlur = 30; ctx.fillStyle = g; ctx.fillText('DUCKQUEST', W / 2, H * 0.28); ctx.shadowBlur = 0; }
+  const fs = Math.max(16, H * 0.03);
+  const live = now - lastPoseAt < 1000;
+  const L = present(players.left, now), R = present(players.right, now);
+  text(live ? `Quest tracking live   ${L ? 'L ✓' : 'L –'}   ${R ? 'R ✓' : 'R –'}` : (questCount ? 'Quest connected — press Start tracking on the Quest' : 'Quest not connected (mouse works for testing)'),
+       W / 2, H * 0.44, fs * 0.8, live ? '#4ade80' : '#ffd27a', 'center', 700);
+  text(isCalibrated() ? 'Calibration: OK' : 'Calibration: needed', W / 2, H * 0.49, fs * 0.8, isCalibrated() ? '#4ade80' : '#f87171', 'center', 700);
+  if (calibWarning) text(calibWarning, W / 2, H * 0.54, fs * 0.75, '#ffb3b3', 'center', 700);
+  const pulse = 0.6 + 0.4 * Math.sin(now / 250);
+  ctx.globalAlpha = pulse;
+  text(live && !isCalibrated() ? 'PULL TRIGGER TO CALIBRATE' : 'PULL TRIGGER / CLICK TO START', W / 2, H * 0.62, fs * 1.2, '#fff', 'center', 900, 12);
+  ctx.globalAlpha = 1;
+  text('A/X or C: calibrate (aim)   ·   T: touch calibration   ·   F: fullscreen   ·   D: debug   ·   reload = aim off-screen + trigger', W / 2, H * 0.69, fs * 0.6, 'rgba(255,255,255,.8)', 'center', 600);
+  if (!sfx.ready()) text('(click or press any key on the Deck once to enable sound)', W / 2, H * 0.74, fs * 0.55, 'rgba(255,255,255,.6)', 'center', 600);
+}
+
+
+// Live tracking view for the calibration screens: where each controller points, tracking quality, trigger.
+function drawCalibLive(now){
+  const bs = Math.round(H * 0.15), y0 = H * 0.66, fs = Math.max(13, H * 0.022);
+  [CAL.who].forEach(n => {
+    const p = players[n], r = p.raw, ok = present(p, now) && r;
+    const cx = W / 2, x0 = cx - bs / 2;
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(x0, y0, bs, bs);
+    ctx.strokeStyle = ok ? p.color : '#666'; ctx.lineWidth = 2; ctx.strokeRect(x0, y0, bs, bs);
+    ctx.strokeStyle = 'rgba(255,255,255,.2)'; ctx.beginPath();
+    ctx.moveTo(cx, y0); ctx.lineTo(cx, y0 + bs); ctx.moveTo(x0, y0 + bs / 2); ctx.lineTo(x0 + bs, y0 + bs / 2); ctx.stroke();
+    if (ok){
+      const d = qrot(r.q, [0, 0, -1]);       // pointing direction in the Quest's frame
+      const px = x0 + bs / 2 + clamp(MIRROR ? -d[0] : d[0], -1, 1) * bs * 0.45, py = y0 + bs / 2 + clamp(-d[1], -1, 1) * bs * 0.45;
+      const trig = r.trig > 0.6;
+      ctx.fillStyle = trig ? '#fff' : p.color; ctx.beginPath(); ctx.arc(px, py, Math.max(5, bs * (trig ? 0.07 : 0.045)), 0, Math.PI * 2); ctx.fill();
+    }
+    const label = !ok ? 'NOT SEEN' : (r.emu ? 'EMULATED (weak)' : 'TRACKING OK');
+    text(`${p.label}  ${label}`, cx, y0 + bs + fs * 1.2, fs, !ok ? '#f87171' : (r.emu ? '#ffd27a' : '#4ade80'), 'center', 700);
+    if (ok){
+      text(`trigger ${r.trig.toFixed(2)}`, cx, y0 + bs + fs * 2.4, fs * 0.8, 'rgba(255,255,255,.75)', 'center', 600);
+      text(`height ${r.p[1].toFixed(2)} m`, cx, y0 + bs + fs * 3.5, fs * 0.8, 'rgba(255,255,255,.75)', 'center', 600);
+    }
+  });
+}
+function drawCalib(now){
+  overlay(0.8);
+  const fs = Math.max(16, H * 0.032), pulse = 0.5 + 0.5 * Math.sin(now / 180);
+  const who = CAL.who, P = players[who], nC = CAL.corners.length, total = CAL.quick ? 1 : nC + 1;
+  const stepNo = CAL.quick ? 1 : Math.min(CAL.step + 1, total), tracked = present(P, now) && P.raw;
+  text(`${P.label} - ${who.toUpperCase()} CONTROLLER`, W / 2, H * 0.1, fs * 1.5, P.color, 'center', 900);
+  text(`STEP ${stepNo} OF ${total}`, W / 2, H * 0.17, fs * 1.0, '#ffb703', 'center', 900);
+  text(tracked ? 'TRACKING OK' : `NOT TRACKED - pick up the ${who} controller and hold it in front of the Quest`, W / 2, H * 0.23, fs * 0.7, tracked ? '#4ade80' : '#f87171', 'center', 800);
+  if (CAL.step < nC){
+    const [key, name] = CAL.corners[CAL.step];
+    const cx = key[1] === 'r' ? W : 0, cy = key[0] === 'b' ? H : 0;
+    ctx.strokeStyle = '#ffb703'; ctx.lineWidth = 6;
+    for (let k = 1; k <= 3; k++){ ctx.globalAlpha = (1 - k / 4) * (0.5 + pulse * 0.5); ctx.beginPath(); ctx.arc(cx, cy, k * H * 0.06 + pulse * 10, 0, Math.PI * 2); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+    if (CAL.mode === 'aim'){
+      text(`From where you play, AIM at the ${name} corner`, W / 2, H * 0.4, fs, '#fff', 'center', 800);
+      text(`of the picture and pull the ${who} controller's trigger. Hold steady.`, W / 2, H * 0.46, fs * 0.8, '#fff', 'center', 600);
+    } else {
+      text(`Touch the FRONT TIP of the ${who} controller to the ${name} corner`, W / 2, H * 0.4, fs, '#fff', 'center', 800);
+      text('of the picture (where the image ends), then pull the trigger.', W / 2, H * 0.46, fs * 0.8, '#fff', 'center', 600);
+    }
+    text('Use only this controller for all four corners, then the bullseye.', W / 2, H * 0.52, fs * 0.6, 'rgba(255,255,255,.7)', 'center', 600);
+  } else {
+    const cx = W / 2, cy = H * 0.47;
+    for (let k = 4; k >= 1; k--){ ctx.fillStyle = k % 2 ? '#e23d3d' : '#fff'; ctx.beginPath(); ctx.arc(cx, cy, k * H * 0.025, 0, Math.PI * 2); ctx.fill(); }
+    text('From where you play, aim at the bullseye and pull the trigger.', W / 2, H * 0.3, fs * 0.9, '#fff', 'center', 800);
+    if (P.rawN){ // uncorrected aim, so you see what is being fixed
+      const x = clamp(P.rawN.x * W, 10, W - 10), y = clamp(P.rawN.y * H, 10, H - 10);
+      ctx.strokeStyle = P.color; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, 14, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+  if (CAL.msg) text(CAL.msg, W / 2, H * 0.86, fs * 0.7, '#f87171', 'center', 700);
+  drawCalibLive(now);
+  text(`START / B = skip ${P.label}`, W / 2, H * 0.89, fs * 0.6, '#ffd27a', 'center', 800);
+  text('Esc / BACK: cancel   V / D-PAD RIGHT: mirror view', W / 2, H * 0.93, fs * 0.55, 'rgba(255,255,255,.6)', 'center', 600);
+}
+
+function drawDebug(now){
+  ctx.font = font(13, 500); ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = '#0f0';
+  const lines = [
+    `fps ${G.fps.toFixed(0)}  ws ${ws ? ws.readyState : '-'}  quests ${questCount}  pose age ${(now - lastPoseAt).toFixed(0)}ms`,
+    `calib P1 ${calibs.left ? 'yes' : 'no'}  P2 ${calibs.right ? 'yes' : 'no'}  state ${G.state}`,
+    ...Array.from(navigator.getGamepads ? navigator.getGamepads() : []).filter(Boolean).map(g => `pad ${g.index} ${g.mapping || 'raw'} ${g.id.slice(0, 40)}  axes ${g.axes.map(a => a.toFixed(1)).join(' ')}  btn ${g.buttons.map((b, i) => b.pressed ? i : '').filter(x => x !== '').join(',')}`),
+    `poses ${POSE.hz.toFixed(0)} Hz   gap avg ${POSE.avg.toFixed(1)} ms   worst ${(POSE.shownMax || 0).toFixed(0)} ms   render ${G.fps.toFixed(0)} fps`,
+    `smoothing ${smoothLevel}/${SMOOTH_MIN.length - 1}   (keys [ ])`,
+    `bridge pad: ${PAD.remote && performance.now() - PAD.remote.t < 1500 ? 'live' : 'none'}`,
+    `pads seen: ${Array.from(navigator.getGamepads ? navigator.getGamepads() : []).filter(Boolean).length}`
+  ];
+  for (const n of ['left', 'right']){
+    const p = players[n], r = p.raw;
+    lines.push(`${n}: ${r ? `p=[${r.p.join(', ')}] trig=${r.trig}${r.emu ? ' EMULATED' : ''}` : '—'}  aim=${p.hasAim ? `${p.nx.toFixed(3)}, ${p.ny.toFixed(3)}` : 'none'}`);
+  }
+  ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(8, H * 0.12, 620, lines.length * 18 + 10);
+  ctx.fillStyle = '#0f0'; lines.forEach((l, i) => ctx.fillText(l, 14, H * 0.12 + 5 + i * 18));
+}
+
+function render(now){
+  ctx.save(); if (G.shake > 0) ctx.translate(rand(-1, 1) * G.shake * 22, rand(-1, 1) * G.shake * 22);
+  if (RETRO) retroWorld(now); else drawWorld(now);
+  for (const d of G.ducks) d.draw(now);
+  if (G.bear) G.bear.draw(false);
+  if (G.mode === 'party' && (G.state === 'roundIntro' || G.state === 'playing' || G.state === 'roundClear' || G.state === 'finale')) partyDraw(now);
+  if (RETRO) retroFront(); else drawGrass(now);
+  if (G.bear) G.bear.draw(true);
+  if (RETRO) for (const q of particles){ ctx.globalAlpha = clamp(q.life * 2, 0, 1); ctx.fillStyle = q.conf ? q.color : (q.dot ? '#fcfcfc' : '#f8d8a8'); const s = Math.max(2, PX) * (q.conf ? 1.5 : 1); ctx.fillRect(Math.round(q.x / s) * s, Math.round(q.y / s) * s, s, s); ctx.globalAlpha = 1; }
+  else for (const q of particles){
+    ctx.save(); ctx.globalAlpha = clamp(q.life, 0, 1); ctx.translate(q.x, q.y); ctx.rotate(q.rot); ctx.fillStyle = q.color;
+    ctx.beginPath(); if (q.dot) ctx.arc(0, 0, 3, 0, Math.PI * 2); else ctx.ellipse(0, 0, 7, 2.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  }
+  for (const q of popups){ ctx.globalAlpha = clamp(q.life / q.max * 1.5, 0, 1); text(q.text, q.x, q.y, Math.max(16, H * 0.03), q.color, 'center', 900); ctx.globalAlpha = 1; }
+
+  const fs = Math.max(18, H * 0.05);
+  if (G.state === 'title') drawTitle(now);
+  else if (G.state === 'calib') drawCalib(now);
+  else if (G.state === 'menu') drawMenu(now);
+  else {
+    if (RETRO) retroHUD(now); else drawHUD(now);
+    if (G.state === 'roundIntro'){
+      if (G.mode === 'party' && G.party){ text(`LEVEL ${G.round}`, W / 2, H * 0.36, fs * 1.6, '#fff', 'center', 900, 20); text(G.party.lv.name, W / 2, H * 0.46, fs * 1.1, '#ffd84d', 'center', 900); text(`POP ${G.party.lv.quota} BALLOONS!`, W / 2, H * 0.54, fs * 0.8, '#fff', 'center', 800); }
+      else text(`ROUND ${G.round}`, W / 2, H * 0.42, fs * 1.6, '#fff', 'center', 900, 20);
+    }
+    if (G.state === 'finale') drawFinale(now);
+    if (G.state === 'roundClear') text(G.mode === 'party' ? (G.retry ? `POP ${Math.max(0, G.party.lv.quota - G.party.popped)} MORE - TRY AGAIN!` : 'LEVEL CLEAR!') : (G.perfect ? 'PERFECT!  +1000' : 'ROUND CLEAR!'), W / 2, H * 0.42, fs * 1.4, '#ffe27a', 'center', 900, 20);
+    if (G.state === 'gameover'){
+      if (!RETRO) overlay(0.55); else retroBox(W * 0.2, H * 0.18, W * 0.6, H * 0.6);
+      if (RETRO){ if (!G.dog) G.dog = { kind: 'laugh', n: 0, x: W * 0.5, t: 0.4 }; G.dog.t = 0.4 + (performance.now() / 1000) % 0.8; drawDogPop(); }
+      text('GAME OVER', W / 2, H * 0.32, fs * 1.6, '#f87171', 'center', 900, 20);
+      const shown = PLIST.filter(p => p.joined || p.score > 0);
+      shown.forEach((p, i) => {
+        const acc = p.shots ? Math.round(p.hits / p.shots * 100) : 0;
+        text(`${p.label}   ${p.score} pts   ${p.hits} ducks   ${acc}% accuracy`, W / 2, H * 0.45 + i * fs * 1.1, fs * 0.7, p.color, 'center', 800);
+      });
+      if (G.stateT > 1.5) text('Pull trigger / click to continue', W / 2, H * 0.78, fs * 0.6, '#fff', 'center', 700);
+    }
+  }
+  if (G.state !== 'calib') for (const p of PLIST) drawCrosshair(p, now);
+  if (G.flash > 0){ ctx.fillStyle = `rgba(255,255,255,${G.flash * 2})`; ctx.fillRect(0, 0, W, H); }
+  if (G.debug) drawDebug(now);
+  ctx.restore();
+}
+
+// ---------- loop ----------
+let last = performance.now();
+function loop(now){
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (dt > 0) G.fps += ((1 / dt) - G.fps) * 0.05;
+  update(dt, now); render(now);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+// Firefox here allows autoplay (media.autoplay.default=0), so start audio/music without waiting for a click; keep retrying until it runs.
+setInterval(() => { if (!sfx.ready()) sfx.init(); }, 1000);
+
+// ?demo=<name> jumps straight to a game state (used for the README screenshots): title menu specials normal dog bear party1 party4 finale
+{
+  const demo = new URLSearchParams(location.search).get('demo');
+  if (demo) setTimeout(() => {
+    const far = performance.now() + 1e9;
+    const aim = (p, x, y) => { p.lastSeen = far; p.hasAim = true; p.nx = x; p.ny = y; p.bx = x; p.by = y; };
+    const duo = () => { aim(players.left, 0.36, 0.34); aim(players.right, 0.62, 0.3); players.left.joined = players.right.joined = true; players.left.score = 1250; players.right.score = 870; };
+    const freeze = () => { update = () => {}; };
+    const scenes = {
+      title(){ },
+      menu(){ openMenu('main'); aim(players.left, 0.7, 0.55); },
+      specials(){ openMenu('specials'); },
+      normal(){ G.mode = 'normal'; startGame(); G.state = 'playing'; duo(); G.tally = ['hit', 'hit', 'miss', 'hit']; },
+      dog(){ G.mode = 'normal'; startGame(); duo(); G.stateT = 1.15; freeze(); },
+      bear(){ G.mode = 'normal'; startGame(); G.state = 'playing'; G.round = 2; duo(); G.bear = new Bear(); G.bear.hp = 3; G.bear.t = G.bear.T * 0.62; G.bear.k = 0.62; G.bear.geom(); freeze(); },
+      party1(){ G.mode = 'party'; startGame(); G.state = 'playing'; duo(); G.party.popped = 11; },
+      party4(){ G.mode = 'party'; G.round = 4; startGame(); G.round = 4; setupParty(); G.state = 'playing'; duo(); G.party.popped = 47; },
+      finale(){ G.mode = 'party'; G.round = 4; setupParty(); G.state = 'playing'; duo(); aim(players.left, 0.08, 0.66); aim(players.right, 0.92, 0.66); G.party.popped = 80; G.party.timeLeft = 0.01; }
+    };
+    (scenes[demo] || (() => {}))();
+  }, 1500);
+}
+</script>
+</body>
+</html>

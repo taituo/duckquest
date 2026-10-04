@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pem
+.DS_Store
+duckquest/calib.json
+duckquest/calib.prev.json
+duckquest/calib-backups/

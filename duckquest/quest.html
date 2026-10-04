@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DuckQuest Tracker</title>
+<style>
+  :root{--bg:#10131c;--fg:#eef2ff;--muted:#9aa4c4;--ok:#4ade80;--bad:#f87171;--acc:#ffb703}
+  body{margin:0;background:var(--bg);color:var(--fg);font:18px/1.5 system-ui,sans-serif;padding:24px;max-width:760px}
+  h1{margin:0 0 8px;font-size:34px;letter-spacing:.04em}
+  #status{font-weight:700;margin:12px 0}
+  .ok{color:var(--ok)} .bad{color:var(--bad)}
+  button{font:inherit;font-size:26px;font-weight:800;padding:18px 36px;border:0;border-radius:14px;background:var(--acc);color:#111;cursor:pointer}
+  button:disabled{opacity:.4}
+  ol{color:var(--muted)} li{margin:6px 0}
+  code{background:#1d2333;padding:2px 6px;border-radius:6px}
+</style>
+</head>
+<body>
+<h1>🦆 DuckQuest Tracker</h1>
+<div id="status" class="bad">Connecting to the Steam Deck…</div>
+<button id="start">Start tracking</button>
+<ol>
+  <li>Press <b>Start tracking</b> and allow the immersive session.</li>
+  <li>You will see passthrough. Take the headset off (sensor between the lenses taped over).</li>
+  <li>Place it under the TV facing the players and don't move it again.</li>
+  <li>On the TV: press <b>A/X</b> on a controller (or <code>C</code> on the Deck) to calibrate.</li>
+</ol>
+<p style="color:var(--muted)">If you long-press the Meta button (recenter) or the boundary resets, calibrate again.</p>
+
+<script>
+'use strict';
+const statusEl = document.getElementById('status');
+const startBtn = document.getElementById('start');
+let ws = null, wsOk = false, session = null, refSpace = null, gl = null, frames = 0;
+const sources = {};   // handedness -> XRInputSource (for haptics)
+
+// Remote log: errors and key events go to the server terminal (so the Quest can be debugged without adb).
+const rlog = (level, ...a) => { try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'log', level, msg: a.map(x => (x && x.stack) || String(x)).join(' ') })); } catch {} };
+addEventListener('error', e => rlog('error', e.message, e.filename + ':' + e.lineno));
+addEventListener('unhandledrejection', e => rlog('error', 'unhandled rejection', e.reason));
+for (const lv of ['log', 'warn', 'error']){ const o = console[lv]; console[lv] = (...a) => { rlog(lv, ...a); o.apply(console, a); }; }
+function setStatus(text, ok){ statusEl.textContent = text; statusEl.className = ok ? 'ok' : 'bad'; }
+
+function connect(){
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws?role=quest`);
+  ws.onopen = () => { wsOk = true; rlog('info', 'quest page connected', navigator.userAgent, 'xr=' + !!navigator.xr); if(!session) setStatus('Connected to Steam Deck. Press Start tracking.', true); };
+  ws.onclose = () => { wsOk = false; setStatus('Disconnected — retrying…', false); setTimeout(connect, 1000); };
+  ws.onerror = () => {};
+  ws.onmessage = e => {
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    if (m.type === 'haptic') pulse(m.hand, m.strength, m.ms);
+  };
+}
+connect();
+
+function pulse(hand, strength = 0.5, ms = 40){
+  const src = sources[hand]; if (!src || !src.gamepad) return;
+  try {
+    const h = src.gamepad.hapticActuators && src.gamepad.hapticActuators[0];
+    if (h && h.pulse) { h.pulse(Math.min(1, strength), ms); return; }
+    const v = src.gamepad.vibrationActuator;
+    if (v && v.playEffect) v.playEffect('dual-rumble', {duration: ms, strongMagnitude: strength, weakMagnitude: strength});
+  } catch {}
+}
+
+const r4 = v => Math.round(v * 10000) / 10000;
+const btn = (gp, i) => (gp && gp.buttons[i]) ? gp.buttons[i] : null;
+
+function onFrame(t, frame){
+  session.requestAnimationFrame(onFrame);
+  const layer = session.renderState.baseLayer;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+  gl.clearColor(0, 0, 0, session.environmentBlendMode === 'opaque' ? 1 : 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  const out = { type: 'pose', t: Math.round(t), hands: {} };
+  for (const src of session.inputSources){
+    const hand = src.handedness;
+    if (hand !== 'left' && hand !== 'right') continue;
+    sources[hand] = src;
+    const pose = frame.getPose(src.targetRaySpace, refSpace);
+    if (!pose) continue;
+    const p = pose.transform.position, q = pose.transform.orientation;
+    const gp = src.gamepad;
+    const trig = btn(gp, 0), grip = btn(gp, 1), a = btn(gp, 4), b = btn(gp, 5);
+    const entry = {
+      p: [r4(p.x), r4(p.y), r4(p.z)],
+      q: [r4(q.x), r4(q.y), r4(q.z), r4(q.w)],
+      trig: trig ? r4(trig.value || (trig.pressed ? 1 : 0)) : 0,
+      grip: grip ? r4(grip.value) : 0,
+      a: !!(a && a.pressed),
+      b: !!(b && b.pressed),
+      hand: !!src.hand,
+      emu: !!pose.emulatedPosition
+    };
+    // Grip pose + velocity: not used by DuckQuest, but ready for a sword game later.
+    const gpose = src.gripSpace && frame.getPose(src.gripSpace, refSpace);
+    if (gpose && gpose.linearVelocity){
+      const v = gpose.linearVelocity; entry.v = [r4(v.x), r4(v.y), r4(v.z)];
+    }
+    out.hands[hand] = entry;
+  }
+  frames++;
+  if (wsOk && ws.readyState === 1 && ws.bufferedAmount < 64000) ws.send(JSON.stringify(out));
+}
+
+startBtn.onclick = async () => {
+  if (!navigator.xr){ setStatus('WebXR not available. Open this page over https:// (see README).', false); return; }
+  try {
+    let mode = 'immersive-vr';
+    try { if (await navigator.xr.isSessionSupported('immersive-ar')) mode = 'immersive-ar'; } catch {}
+    rlog('info', 'requesting', mode);
+    session = await navigator.xr.requestSession(mode);
+    const canvas = document.createElement('canvas');
+    gl = canvas.getContext('webgl', { xrCompatible: true, alpha: true });
+    if (gl.makeXRCompatible) await gl.makeXRCompatible();
+    session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+    // Highest display/tracking rate the headset offers (72 -> 90/120 Hz): smoother, lower-latency poses.
+    try {
+      const rates = session.supportedFrameRates && Array.from(session.supportedFrameRates);
+      if (rates && rates.length && session.updateTargetFrameRate){ const r = Math.max(...rates); await session.updateTargetFrameRate(r); rlog('info', 'frame rate set to', r, 'of', rates.join('/')); }
+      else rlog('info', 'frame rate control not available');
+    } catch (e) { rlog('warn', 'frame rate', e); }
+    refSpace = await session.requestReferenceSpace('local');
+    refSpace.addEventListener && refSpace.addEventListener('reset', () => {
+      if (wsOk) ws.send(JSON.stringify({ type: 'reset' }));
+    });
+    session.addEventListener('end', () => {
+      session = null; startBtn.disabled = false; rlog('info', 'session ended');
+      setStatus('Tracking stopped. Press Start tracking again.', false);
+    });
+    startBtn.disabled = true;
+    setStatus('Tracking (' + mode + ')', true); rlog('info', 'tracking started', mode);
+    session.requestAnimationFrame(onFrame);
+  } catch (e) {
+    session = null;
+    setStatus('Could not start XR: ' + e.message, false); rlog('error', 'XR start failed', e);
+  }
+};
+</script>
+</body>
+</html>
