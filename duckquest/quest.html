@@ -10,7 +10,7 @@
   h1{margin:0 0 8px;font-size:34px;letter-spacing:.04em}
   #status{font-weight:700;margin:12px 0}
   .ok{color:var(--ok)} .bad{color:var(--bad)}
-  button{font:inherit;font-size:26px;font-weight:800;padding:18px 36px;border:0;border-radius:14px;background:var(--acc);color:#111;cursor:pointer}
+  button{font:inherit;font-size:46px;font-weight:900;padding:36px 60px;width:100%;border:0;border-radius:22px;background:var(--acc);color:#111;cursor:pointer}
   button:disabled{opacity:.4}
   ol{color:var(--muted)} li{margin:6px 0}
   code{background:#1d2333;padding:2px 6px;border-radius:6px}
@@ -66,6 +66,13 @@ function pulse(hand, strength = 0.5, ms = 40){
 }
 
 const r4 = v => Math.round(v * 10000) / 10000;
+let inpSig = '', inpLogT = 0;
+function describeInputs(frame){
+  return Array.from(session.inputSources).map(s => {
+    let pose = false; try { pose = !!frame.getPose(s.targetRaySpace, refSpace); } catch {}
+    return `${s.handedness || '?'}:${s.hand ? 'hand' : s.gamepad ? 'controller' : s.targetRayMode}:${pose ? 'pose' : 'NO-POSE'}`;
+  });
+}
 const btn = (gp, i) => (gp && gp.buttons[i]) ? gp.buttons[i] : null;
 
 function onFrame(t, frame){
@@ -75,7 +82,9 @@ function onFrame(t, frame){
   gl.clearColor(0, 0, 0, session.environmentBlendMode === 'opaque' ? 1 : 0);
   gl.clear(gl.COLOR_BUFFER_BIT);
 
-  const out = { type: 'pose', t: Math.round(t), hands: {} };
+  const inp = describeInputs(frame), sig = inp.join(' ');
+  if (sig !== inpSig || t - inpLogT > 5000){ if (sig !== inpSig) rlog('info', 'inputs:', sig || 'none'); inpSig = sig; inpLogT = t; }
+  const out = { type: 'pose', t: Math.round(t), hands: {}, inp };
   for (const src of session.inputSources){
     const hand = src.handedness;
     if (hand !== 'left' && hand !== 'right') continue;
@@ -90,6 +99,7 @@ function onFrame(t, frame){
       q: [r4(q.x), r4(q.y), r4(q.z), r4(q.w)],
       trig: trig ? r4(trig.value || (trig.pressed ? 1 : 0)) : 0,
       grip: grip ? r4(grip.value) : 0,
+      stick: gp ? [r4(gp.axes[2] || 0), r4(gp.axes[3] || 0)] : [0, 0],   // thumbstick (Touch controllers: axes 2, 3)
       a: !!(a && a.pressed),
       b: !!(b && b.pressed),
       hand: !!src.hand,
@@ -120,7 +130,8 @@ startBtn.onclick = async () => {
     // Highest display/tracking rate the headset offers (72 -> 90/120 Hz): smoother, lower-latency poses.
     try {
       const rates = session.supportedFrameRates && Array.from(session.supportedFrameRates);
-      if (rates && rates.length && session.updateTargetFrameRate){ const r = Math.max(...rates); await session.updateTargetFrameRate(r); rlog('info', 'frame rate set to', r, 'of', rates.join('/')); }
+      if (rates && rates.length && session.updateTargetFrameRate){ const r = Math.max(...rates);   // do NOT await: it only resolves after the first frame, which starts below
+        session.updateTargetFrameRate(r).then(() => rlog('info', 'frame rate set to', r, 'of', rates.join('/'))).catch(e => rlog('warn', 'frame rate', e)); }
       else rlog('info', 'frame rate control not available');
     } catch (e) { rlog('warn', 'frame rate', e); }
     refSpace = await session.requestReferenceSpace('local');
@@ -134,6 +145,7 @@ startBtn.onclick = async () => {
     startBtn.disabled = true;
     setStatus('Tracking (' + mode + ')', true); rlog('info', 'tracking started', mode);
     session.requestAnimationFrame(onFrame);
+    rlog('info', 'first frame requested');
   } catch (e) {
     session = null;
     setStatus('Could not start XR: ' + e.message, false); rlog('error', 'XR start failed', e);

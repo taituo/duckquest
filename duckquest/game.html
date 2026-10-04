@@ -802,7 +802,7 @@ class Bear {
 
 
 // ---------- menu: shoot an item (or D-pad / arrows + Start/Enter) ----------
-const MENUS = { main: ['NORMAL GAME', 'SPECIALS', 'PRINCESS PARTY', 'CALIBRATE'], specials: ['BEAR HUNT', 'BACK'] };
+const MENUS = { main: ['NORMAL GAME', 'SPECIALS', 'PRINCESS PARTY', 'CALIBRATE'], specials: ['BEAR HUNT', 'BOXING', 'BACK'] };
 const MENU = { id: 'main', sel: 0, boxes: [] };
 const menuItems = () => MENUS[MENU.id];
 function openMenu(id = 'main'){ G.state = 'menu'; MENU.id = id; MENU.sel = 0; MENU.boxes = []; }
@@ -814,6 +814,7 @@ function menuActivate(i, p){
   else if (it === 'PRINCESS PARTY'){ G.mode = 'party'; startGame(); }
   else if (it === 'CALIBRATE') calibrateFor(p && p.name !== 'mouse' ? p.name : 'left');
   else if (it === 'BEAR HUNT'){ G.mode = 'bears'; startGame(); }
+  else if (it === 'BOXING') location.href = '/boxing/boxing.html';
   else if (it === 'BACK') openMenu('main');
 }
 const menuBoxAt = (x, y) => MENU.boxes.findIndex(b => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h);

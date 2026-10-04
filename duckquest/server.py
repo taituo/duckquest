@@ -99,6 +99,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=ROOT, **kwargs)
 
+    def translate_path(self, path):
+        # /duel/... and /boxing/... are served from sibling folders (other games live next to duckquest/)
+        up = urlparse(path).path
+        for game in ("duel", "boxing", "reach"):
+            if up.startswith("/" + game + "/"):
+                saved = self.directory
+                self.directory = os.path.join(os.path.dirname(ROOT), game)
+                try:
+                    return super().translate_path(up[len(game) + 1:])
+                finally:
+                    self.directory = saved
+        return super().translate_path(path)
+
     def log_message(self, fmt, *args):  # keep the console quiet
         pass
 

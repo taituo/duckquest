@@ -4,7 +4,7 @@
 
 Put the Quest on a shelf facing the players. Its cameras track the two controllers, and any computer on the same Wi-Fi (Steam Deck, PC, Mac) runs the game on the TV. The controllers become light guns, swords or pointers.
 
-The first game is **DuckQuest**: a retro, NES-style duck shooter with a dog, a very large bear and a princess balloon party. Everything is plain HTML and Python, with no installs and no build step.
+The first game is **DuckQuest**: a retro, NES-style duck shooter with a dog, a very large bear and a princess balloon party. The second is **BoxQuest**, first-person boxing. Everything is plain HTML and Python, with no installs and no build step.
 
 | | | |
 |---|---|---|
@@ -13,6 +13,17 @@ The first game is **DuckQuest**: a retro, NES-style duck shooter with a dog, a v
 | ![Princess party, level 1](docs/img/party-level1.jpg) | ![Princess party, level 4](docs/img/party-level4.jpg) | ![Birthday finale](docs/img/finale.jpg) |
 
 *All screenshots are real frames from the game (demo scenes: add `?demo=menu`, `ducks`, `bear`, `party4`, ... to the address).*
+
+### BoxQuest: first-person boxing
+
+The second game is **BoxQuest**: you are the boxer. Each controller is a glove, and you punch by moving it fast toward the opponent. Hold both gloves up to block, step and side-step with the thumbstick. It is drawn as pixel art with modern lighting (palette and dithering, bloom, a crowd with camera flashes), with three opponents, hit-stop, slow-motion knockdowns and a K.O. fall. Start it from **Specials, Boxing** in the menu, or open `/boxing/boxing.html`. More in [`boxing/README.md`](boxing/README.md).
+
+| | | |
+|---|---|---|
+| ![BoxQuest title](docs/img/box-title.jpg) | ![The fight](docs/img/box-fight.jpg) | ![His punch is coming: the glove glows and a flash shows the side](docs/img/box-warning.jpg) |
+| ![A hook to the head](docs/img/box-hit.jpg) | ![Knockdown count](docs/img/box-knockdown.jpg) | ![K.O.](docs/img/box-ko.jpg) |
+
+*Demo scenes: add `?demo=title`, `fight`, `wind`, `hit`, `down`, `ko` or `lose` to the address.* Tip: hold each controller with the **black ring toward the Quest**. The cameras see it much better.
 
 ## How it works
 
@@ -81,6 +92,6 @@ Measured with the debug overlay (**D**): about 90 pose updates per second, 11 ms
 
 ## Credits
 
-DuckQuest is a tribute to arcade and NES light-gun games. It is not affiliated with Nintendo, and all in-game art, sounds and music are original code. The birthday tune is the traditional "Happy Birthday to You". The placement illustration was made with an AI image generator. It was written with [Claude Code](https://claude.com/claude-code) on a Mac, a Steam Deck and a Meta Quest 3.
+DuckQuest is a tribute to arcade and NES light-gun games, and BoxQuest to 4D Sports Boxing and arcade fighters. Neither is affiliated with Nintendo or any other company, and all in-game art, sounds and music are original code. The birthday tune is the traditional "Happy Birthday to You". The placement illustration was made with an AI image generator. It was written with [Claude Code](https://claude.com/claude-code) on a Mac, a Steam Deck and a Meta Quest 3.
 
 License: [MIT](LICENSE).
