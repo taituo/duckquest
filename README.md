@@ -81,6 +81,6 @@ Measured with the debug overlay (**D**): about 90 pose updates per second, 11 ms
 
 ## Credits
 
-DuckQuest is a tribute to arcade and NES light-gun games. It is not affiliated with Nintendo, and all art, sounds and music here are original code. The birthday tune is the traditional "Happy Birthday to You". The placement illustration was made with an AI image generator. It was written with [Claude Code](https://claude.com/claude-code) on a Mac, a Steam Deck and a Meta Quest 3.
+DuckQuest is a tribute to arcade and NES light-gun games. It is not affiliated with Nintendo, and all in-game art, sounds and music are original code. The birthday tune is the traditional "Happy Birthday to You". The placement illustration was made with an AI image generator. It was written with [Claude Code](https://claude.com/claude-code) on a Mac, a Steam Deck and a Meta Quest 3.
 
 License: [MIT](LICENSE).
