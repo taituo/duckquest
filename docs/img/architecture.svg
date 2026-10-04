@@ -1,45 +1,85 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" font-family="ui-monospace, Menlo, Consolas, monospace">
-  <rect width="960" height="400" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" font-family="ui-rounded, 'Trebuchet MS', Verdana, sans-serif">
   <defs>
-    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#333"/></marker>
+    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#2b2f3a"/></marker>
+    <linearGradient id="scr" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4fc3ff"/><stop offset="1" stop-color="#b9e8ff"/></linearGradient>
   </defs>
-  <g stroke="#222" stroke-width="2" fill="none">
-    <rect x="30" y="40" width="250" height="150" rx="10" fill="#e8f1ff"/>
-    <rect x="355" y="40" width="250" height="150" rx="10" fill="#fff4d6"/>
-    <rect x="680" y="40" width="250" height="150" rx="10" fill="#e6f7e6"/>
-    <rect x="680" y="240" width="250" height="120" rx="10" fill="#f3e6f7"/>
-    <path d="M280 115 H355" marker-end="url(#a)"/>
-    <path d="M605 115 H680" marker-end="url(#a)"/>
-    <path d="M805 240 V190" marker-end="url(#a)"/>
-    <path d="M730 300 H520 Q480 300 480 270 V190" stroke-dasharray="6 5" marker-end="url(#a)"/>
+  <rect width="1200" height="600" fill="#faf8f4"/>
+
+  <text x="600" y="58" text-anchor="middle" font-size="34" font-weight="800" fill="#232733">How DuckQuest works</text>
+  <text x="600" y="92" text-anchor="middle" font-size="19" fill="#555b6b">The Quest watches the controllers. A small relay passes the poses to the game on the TV.</text>
+
+  <!-- 1 QUEST -->
+  <g transform="translate(40,150)">
+    <rect width="300" height="300" rx="22" fill="#eaf2ff" stroke="#2b2f3a" stroke-width="3"/>
+    <circle cx="36" cy="38" r="20" fill="#2a8cff"/><text x="36" y="46" text-anchor="middle" font-size="24" font-weight="800" fill="#fff">1</text>
+    <text x="168" y="46" text-anchor="middle" font-size="24" font-weight="800" fill="#232733">Meta Quest 3</text>
+    <!-- headset icon -->
+    <g transform="translate(98,76)">
+      <rect width="104" height="56" rx="18" fill="#f2f4f8" stroke="#2b2f3a" stroke-width="3"/>
+      <rect x="8" y="9" width="88" height="28" rx="11" fill="#d8dde6" stroke="#2b2f3a" stroke-width="2"/>
+      <circle cx="28" cy="23" r="8" fill="#1d2330"/><circle cx="52" cy="23" r="8" fill="#1d2330"/><circle cx="76" cy="23" r="8" fill="#1d2330"/>
+      <circle cx="28" cy="23" r="2.6" fill="#6fe3ff"/><circle cx="52" cy="23" r="2.6" fill="#6fe3ff"/><circle cx="76" cy="23" r="2.6" fill="#6fe3ff"/>
+    </g>
+    <text x="150" y="176" text-anchor="middle" font-size="20" font-weight="700" fill="#232733">quest.html</text>
+    <text x="150" y="203" text-anchor="middle" font-size="17" fill="#444a5a">runs in the Quest Browser</text>
+    <text x="150" y="228" text-anchor="middle" font-size="17" fill="#444a5a">WebXR: where each controller is</text>
+    <text x="150" y="253" text-anchor="middle" font-size="17" fill="#444a5a">trigger, grip, A and B buttons</text>
+    <text x="150" y="278" text-anchor="middle" font-size="17" fill="#444a5a">about 90 updates a second</text>
   </g>
-  <g fill="#111" font-size="15">
-    <text x="155" y="68" text-anchor="middle" font-weight="bold" font-size="17">Meta Quest 3</text>
-    <text x="155" y="96" text-anchor="middle">sits still, facing the players</text>
-    <text x="155" y="118" text-anchor="middle">quest.html (WebXR)</text>
-    <text x="155" y="140" text-anchor="middle">controller poses ~90 Hz</text>
-    <text x="155" y="162" text-anchor="middle">trigger, grip, A/B buttons</text>
 
-    <text x="480" y="68" text-anchor="middle" font-weight="bold" font-size="17">server.py</text>
-    <text x="480" y="96" text-anchor="middle">Python stdlib only</text>
-    <text x="480" y="118" text-anchor="middle">HTTP(S) + WebSocket relay</text>
-    <text x="480" y="140" text-anchor="middle">runs on a Mac, PC or the Deck</text>
-    <text x="480" y="162" text-anchor="middle">saves the calibration</text>
-
-    <text x="805" y="68" text-anchor="middle" font-weight="bold" font-size="17">game.html on the TV</text>
-    <text x="805" y="96" text-anchor="middle">canvas, no build step</text>
-    <text x="805" y="118" text-anchor="middle">aim = ray -> screen plane</text>
-    <text x="805" y="140" text-anchor="middle">per-controller calibration</text>
-    <text x="805" y="162" text-anchor="middle">ducks, bear, princess party</text>
-
-    <text x="805" y="268" text-anchor="middle" font-weight="bold" font-size="17">padbridge.py (Deck)</text>
-    <text x="805" y="294" text-anchor="middle">reads /dev/input/js0</text>
-    <text x="805" y="316" text-anchor="middle">sticks, D-pad, buttons</text>
-    <text x="805" y="338" text-anchor="middle">works without the browser gamepad API</text>
-
-    <text x="318" y="105" text-anchor="middle" font-size="13">Wi-Fi</text>
-    <text x="643" y="105" text-anchor="middle" font-size="13">WebSocket</text>
-    <text x="640" y="320" text-anchor="middle" font-size="13">pad messages</text>
-    <text x="480" y="385" text-anchor="middle" font-size="13" fill="#444">Players point the Quest controllers at the TV; the Quest only watches them.</text>
+  <!-- 2 SERVER -->
+  <g transform="translate(450,150)">
+    <rect width="300" height="300" rx="22" fill="#fff4d6" stroke="#2b2f3a" stroke-width="3"/>
+    <circle cx="36" cy="38" r="20" fill="#f5a300"/><text x="36" y="46" text-anchor="middle" font-size="24" font-weight="800" fill="#fff">2</text>
+    <text x="168" y="46" text-anchor="middle" font-size="24" font-weight="800" fill="#232733">Relay server</text>
+    <!-- server icon -->
+    <g transform="translate(110,74)">
+      <rect width="80" height="22" rx="5" fill="#f2f4f8" stroke="#2b2f3a" stroke-width="3"/><circle cx="64" cy="11" r="3.5" fill="#46b34a"/>
+      <rect y="28" width="80" height="22" rx="5" fill="#f2f4f8" stroke="#2b2f3a" stroke-width="3"/><circle cx="64" cy="39" r="3.5" fill="#46b34a"/>
+    </g>
+    <text x="150" y="176" text-anchor="middle" font-size="20" font-weight="700" fill="#232733">server.py</text>
+    <text x="150" y="203" text-anchor="middle" font-size="17" fill="#444a5a">Python, no packages to install</text>
+    <text x="150" y="228" text-anchor="middle" font-size="17" fill="#444a5a">serves the pages, relays poses</text>
+    <text x="150" y="253" text-anchor="middle" font-size="17" fill="#444a5a">keeps your calibration safe</text>
+    <text x="150" y="278" text-anchor="middle" font-size="17" fill="#444a5a">on a Mac, PC or the Deck</text>
   </g>
+
+  <!-- 3 GAME -->
+  <g transform="translate(860,150)">
+    <rect width="300" height="300" rx="22" fill="#e6f7e6" stroke="#2b2f3a" stroke-width="3"/>
+    <circle cx="36" cy="38" r="20" fill="#3aa84a"/><text x="36" y="46" text-anchor="middle" font-size="24" font-weight="800" fill="#fff">3</text>
+    <text x="168" y="46" text-anchor="middle" font-size="24" font-weight="800" fill="#232733">Game on the TV</text>
+    <!-- tv icon -->
+    <g transform="translate(100,72)">
+      <rect width="100" height="64" rx="8" fill="#2b2b3a"/><rect x="7" y="7" width="86" height="50" rx="3" fill="url(#scr)"/><rect x="7" y="42" width="86" height="15" fill="#46b34a"/>
+      <g fill="none" stroke="#2a8cff" stroke-width="3"><rect x="22" y="14" width="16" height="16" rx="2"/></g>
+      <g fill="none" stroke="#ff9a1f" stroke-width="3"><rect x="58" y="22" width="16" height="16" rx="2"/></g>
+      <rect x="38" y="64" width="24" height="6" fill="#2b2b3a"/>
+    </g>
+    <text x="150" y="176" text-anchor="middle" font-size="20" font-weight="700" fill="#232733">game.html</text>
+    <text x="150" y="203" text-anchor="middle" font-size="17" fill="#444a5a">one file, opens in any browser</text>
+    <text x="150" y="228" text-anchor="middle" font-size="17" fill="#444a5a">turns each pointing ray into</text>
+    <text x="150" y="253" text-anchor="middle" font-size="17" fill="#444a5a">a spot on the screen</text>
+    <text x="150" y="278" text-anchor="middle" font-size="17" fill="#444a5a">ducks, bear, princess party</text>
+  </g>
+
+  <!-- arrows -->
+  <g stroke="#2b2f3a" stroke-width="3.5" fill="none">
+    <path d="M340 300 H450" marker-end="url(#ah)"/>
+    <path d="M750 300 H860" marker-end="url(#ah)"/>
+    <path d="M1010 540 V450" marker-end="url(#ah)" stroke-dasharray="8 7"/>
+  </g>
+  <text x="395" y="284" text-anchor="middle" font-size="16" font-weight="700" fill="#2b2f3a">Wi-Fi</text>
+  <text x="805" y="284" text-anchor="middle" font-size="16" font-weight="700" fill="#2b2f3a">live</text>
+
+  <!-- optional pad bridge -->
+  <g transform="translate(860,470)">
+    <rect y="0" width="300" height="100" rx="18" fill="#f3e6f7" stroke="#2b2f3a" stroke-width="3" stroke-dasharray="9 6"/>
+    <text x="150" y="36" text-anchor="middle" font-size="20" font-weight="800" fill="#232733">Optional: padbridge.py</text>
+    <text x="150" y="62" text-anchor="middle" font-size="16" fill="#444a5a">Steam Deck buttons and sticks</text>
+    <text x="150" y="84" text-anchor="middle" font-size="16" fill="#444a5a">become a third player</text>
+  </g>
+
+  <text x="40" y="500" font-size="18" font-weight="700" fill="#232733">The same page shows the calibration and the menu.</text>
+  <text x="40" y="528" font-size="17" fill="#555b6b">Nobody wears the headset. Players just point the controllers at the TV.</text>
 </svg>
