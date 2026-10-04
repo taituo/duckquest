@@ -25,7 +25,7 @@ The first game is **DuckQuest**: a retro, NES-style duck shooter with a dog, a v
 
 ## Where the Quest goes
 
-![Where to put the Quest](docs/img/placement.svg)
+![Quest 3 placement for controller tracking](docs/img/placement.jpg)
 
 - Put it **under or beside the TV, facing the players**, at about chest height and tilted up a little.
 - Keep the players **1.5 to 2.5 m** away so the cameras see both controllers.
@@ -81,6 +81,6 @@ Measured with the debug overlay (**D**): about 90 pose updates per second, 11 ms
 
 ## Credits
 
-DuckQuest is a tribute to arcade and NES light-gun games. It is not affiliated with Nintendo, and all art, sounds and music here are original code. The birthday tune is the traditional "Happy Birthday to You". It was written with [Claude Code](https://claude.com/claude-code) on a Mac, a Steam Deck and a Meta Quest 3.
+DuckQuest is a tribute to arcade and NES light-gun games. It is not affiliated with Nintendo, and all art, sounds and music here are original code. The birthday tune is the traditional "Happy Birthday to You". The placement illustration was made with an AI image generator. It was written with [Claude Code](https://claude.com/claude-code) on a Mac, a Steam Deck and a Meta Quest 3.
 
 License: [MIT](LICENSE).

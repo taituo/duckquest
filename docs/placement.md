@@ -1,6 +1,10 @@
 # Where to place the Quest
 
-![Where to put the Quest](img/placement.svg)
+![Quest 3 placement for controller tracking](img/placement.jpg)
+
+A cartoon version:
+
+![Where to put the Quest, cartoon](img/placement.svg)
 
 | Placement | Good for | Notes |
 |---|---|---|
