@@ -1,5 +1,7 @@
 # Where to place the Quest
 
+![Where to put the Quest](img/placement.svg)
+
 | Placement | Good for | Notes |
 |---|---|---|
 | **Under the TV, facing the players** | Shooting | Controllers point at the cameras, the side they track best. Chest height, tilted up 10–15°. |

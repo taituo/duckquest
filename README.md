@@ -1,8 +1,8 @@
 # TrackQuest
 
-**A Meta Quest 3 as a living-room tracker for TV games, used without wearing it.**
+**Meta Quest 3 controller tracking for TV games, a bit like a Wii sensor bar.**
 
-Put the Quest on a shelf facing the players. Its cameras track the two controllers, and any computer on the same Wi-Fi (Steam Deck, PC, Mac) runs the game on the TV. The controllers become light guns.
+Put the Quest on a shelf facing the players. Its cameras track the two controllers, and any computer on the same Wi-Fi (Steam Deck, PC, Mac) runs the game on the TV. The controllers become light guns, swords or pointers.
 
 The first game is **DuckQuest**: a retro, NES-style duck shooter with a dog, a very large bear and a princess balloon party. Everything is plain HTML and Python, with no installs and no build step.
 
@@ -23,7 +23,16 @@ The first game is **DuckQuest**: a retro, NES-style duck shooter with a dog, a v
 3. **`duckquest/game.html`** is the game, one file with no build step. It turns each controller's pointing ray into a position on the TV using a per-controller calibration (four corners and a bullseye).
 4. **`duckquest/padbridge.py`** is optional. It reads the Steam Deck's own buttons from `/dev/input` and sends them to the game, so the Deck itself works as a controller even where the browser can't see it.
 
-The Quest only watches the controllers. Players do not need a headset, and the controllers can be pointed at a TV in any direction.
+## Where the Quest goes
+
+![Where to put the Quest](docs/img/placement.svg)
+
+- Put it **under or beside the TV, facing the players**, at about chest height and tilted up a little.
+- Keep the players **1.5 to 2.5 m** away so the cameras see both controllers.
+- Keep it **still** (recalibrate if it moves), with even light in the room.
+- Cover the proximity sensor with tape so it stays awake when nobody wears it.
+
+The Quest only watches the controllers, so nobody needs a headset on. More placements (above the TV, on the chest, on a boom) are in [docs/placement.md](docs/placement.md).
 
 ## What's in the game
 
