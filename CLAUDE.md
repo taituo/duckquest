@@ -8,6 +8,8 @@ Meta Quest 3 used as a stationary controller tracker for TV games. See `README.m
 - **Steam Deck** in Desktop Mode, connected to a small TV (likely mirrored display). Reachable as `ssh deck` (key auth). Never read, print or use credential files on the Deck; nothing here needs sudo.
 - **Meta Quest 3**: joins later, same Wi-Fi.
 
+Longer project notes (lessons, runbook, checklists) live in `reports/` when present.
+
 ## Dev loop (recommended)
 
 Run the server **on the Mac**, use the Deck only as the TV screen:
